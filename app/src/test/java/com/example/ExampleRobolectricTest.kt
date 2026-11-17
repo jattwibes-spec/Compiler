@@ -136,5 +136,6 @@ class ExampleRobolectricTest {
         val gh = GitHubActionsClient(context)
         assertEquals("octo" to "demo", gh.normalizeRepoSlug("https://github.com/octo/demo.git"))
         assertEquals("octo" to "demo", gh.normalizeRepoSlug("octo/demo"))
+        assertEquals("my-cool-app", gh.sanitizeRepoName("My Cool App!"))
     }
 }

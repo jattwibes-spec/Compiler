@@ -91,6 +91,7 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
     val backups by viewModel.activeProjectBackups.collectAsStateWithLifecycle()
     val isIngesting by viewModel.isIngesting.collectAsStateWithLifecycle()
     val isStartingBuild by viewModel.isStartingBuild.collectAsStateWithLifecycle()
+    val isPushingRepo by viewModel.isPushingRepo.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val aiTaskState by viewModel.aiTaskState.collectAsStateWithLifecycle()
     val chatMessages by viewModel.chatMessages.collectAsStateWithLifecycle()
@@ -273,8 +274,11 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                                         config = buildConfig,
                                         settings = settings,
                                         onSaveGithubQuick = viewModel::saveGithubConfigQuick,
+                                        onUpdateGithubRepoOptions = viewModel::updateGithubRepoOptions,
+                                        onPushToNewRepo = viewModel::pushActiveProjectToNewRepo,
                                         onUpdateDownloadFolder = viewModel::updateDownloadFolder,
                                         isStartingBuild = isStartingBuild,
+                                        isPushingRepo = isPushingRepo,
                                         onUpdateConfig = viewModel::updateBuildConfig,
                                         onStartBuild = viewModel::startBuild,
                                         onGoToUpload = { viewModel.setPipelineStep(PipelineStep.UPLOAD) }
@@ -327,6 +331,7 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                                 formatBytes = viewModel::formatBytes,
                                 onUpdateBuildEngineMode = viewModel::updateBuildEngineMode,
                                 onSaveAndVerifyGithub = viewModel::saveAndVerifyGithub,
+                                onUpdateGithubRepoOptions = viewModel::updateGithubRepoOptions,
                                 onUpdateDownloadFolder = viewModel::updateDownloadFolder,
                                 onClearDownloadFolder = viewModel::clearDownloadFolder,
                                 onUpdateServerUrl = viewModel::updateServerUrl,

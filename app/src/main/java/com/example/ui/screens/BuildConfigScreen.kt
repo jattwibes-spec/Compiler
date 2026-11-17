@@ -41,6 +41,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -75,8 +76,11 @@ fun BuildConfigScreen(
     config: BuildConfiguration,
     settings: CompilerSettings,
     onSaveGithubQuick: (String, String) -> Unit,
+    onUpdateGithubRepoOptions: (Boolean, Boolean) -> Unit,
+    onPushToNewRepo: () -> Unit,
     onUpdateDownloadFolder: (String, String) -> Unit,
     isStartingBuild: Boolean,
+    isPushingRepo: Boolean,
     onUpdateConfig: ((BuildConfiguration) -> BuildConfiguration) -> Unit,
     onStartBuild: () -> Unit,
     onGoToUpload: () -> Unit,
@@ -289,14 +293,48 @@ fun BuildConfigScreen(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Auto-create new repo on my account", style = MaterialTheme.typography.labelLarge)
+                                Text("Pushes extracted folder & ZIP into a new GitHub repo", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(
+                                checked = settings.githubAutoCreateRepo,
+                                onCheckedChange = { onUpdateGithubRepoOptions(it, settings.githubPrivateRepo) }
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Private repo", style = MaterialTheme.typography.labelLarge)
+                            Switch(
+                                checked = settings.githubPrivateRepo,
+                                onCheckedChange = { onUpdateGithubRepoOptions(settings.githubAutoCreateRepo, it) }
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
                         OutlinedTextField(
                             value = ghRepoInput,
                             onValueChange = {
                                 ghRepoInput = it
                                 onSaveGithubQuick(it, ghTokenInput)
                             },
-                            label = { Text("GitHub Repository (owner/repo or URL)") },
-                            placeholder = { Text("https://github.com/user/repo") },
+                            label = {
+                                Text(
+                                    if (settings.githubAutoCreateRepo) "New Repo Name (optional, defaults to project name)"
+                                    else "GitHub Repository (owner/repo or URL)"
+                                )
+                            },
+                            placeholder = {
+                                Text(if (settings.githubAutoCreateRepo) "leave blank for auto name" else "https://github.com/user/repo")
+                            },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -472,9 +510,21 @@ fun BuildConfigScreen(
                         Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isStartingBuild) "Uploading & Starting Build..." else if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) "Compile via GitHub Cloud" else "Start Isolated Compilation",
+                            text = if (isStartingBuild) "Creating Repo & Starting Build..." else if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
+                                if (settings.githubAutoCreateRepo) "Create Repo, Push & Compile APK" else "Push & Compile via GitHub Cloud"
+                            } else "Start Isolated Compilation",
                             fontWeight = FontWeight.SemiBold
                         )
+                    }
+                    if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedButton(
+                            onClick = onPushToNewRepo,
+                            enabled = !isPushingRepo && !isStartingBuild && ghTokenInput.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                        ) {
+                            Text(if (isPushingRepo) "Creating Repo & Pushing Files..." else "Push Uploaded Folder & ZIP to New Repo Only")
+                        }
                     }
                 }
             }

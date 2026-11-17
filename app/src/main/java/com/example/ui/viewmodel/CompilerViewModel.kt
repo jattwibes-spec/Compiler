@@ -132,6 +132,9 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
     private val _isStartingBuild = MutableStateFlow(false)
     val isStartingBuild: StateFlow<Boolean> = _isStartingBuild.asStateFlow()
 
+    private val _isPushingRepo = MutableStateFlow(false)
+    val isPushingRepo: StateFlow<Boolean> = _isPushingRepo.asStateFlow()
+
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
@@ -471,6 +474,27 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
                     _githubStatus.value = GithubStatusState.Error(err.localizedMessage ?: "Verification failed.")
                     _statusBanner.value = err.localizedMessage ?: "GitHub verification failed."
                 }
+        }
+    }
+
+    fun updateGithubRepoOptions(autoCreate: Boolean, isPrivate: Boolean) {
+        viewModelScope.launch {
+            repository.updateGithubRepoOptions(autoCreate, isPrivate)
+        }
+    }
+
+    fun pushActiveProjectToNewRepo() {
+        val analysis = _activeAnalysis.value ?: return
+        viewModelScope.launch {
+            _isPushingRepo.value = true
+            repository.pushProjectToNewRepo(analysis.projectId)
+                .onSuccess { res ->
+                    _statusBanner.value = "Created ${res.repoHtmlUrl} and pushed ${res.pushedFileCount} items!"
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Failed to push project to GitHub."
+                }
+            _isPushingRepo.value = false
         }
     }
 

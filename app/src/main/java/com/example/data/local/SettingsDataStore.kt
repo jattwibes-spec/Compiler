@@ -3,6 +3,7 @@ package com.example.data.local
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -27,6 +28,8 @@ data class CompilerSettings(
     val buildEngineMode: BuildEngineMode = BuildEngineMode.GITHUB_ACTIONS,
     val githubRepo: String = "",
     val githubToken: String = "",
+    val githubAutoCreateRepo: Boolean = true,
+    val githubPrivateRepo: Boolean = false,
     val downloadFolderUri: String = "",
     val downloadFolderLabel: String = "",
     val serverBaseUrl: String = "http://10.0.2.2:8000",
@@ -44,6 +47,8 @@ class SettingsDataStore(private val context: Context) {
         val BUILD_ENGINE_MODE = stringPreferencesKey("build_engine_mode")
         val GITHUB_REPO = stringPreferencesKey("github_repo")
         val GITHUB_TOKEN = stringPreferencesKey("github_token")
+        val GITHUB_AUTO_CREATE_REPO = booleanPreferencesKey("github_auto_create_repo")
+        val GITHUB_PRIVATE_REPO = booleanPreferencesKey("github_private_repo")
         val DOWNLOAD_FOLDER_URI = stringPreferencesKey("download_folder_uri")
         val DOWNLOAD_FOLDER_LABEL = stringPreferencesKey("download_folder_label")
         val SERVER_BASE_URL = stringPreferencesKey("server_base_url")
@@ -62,6 +67,8 @@ class SettingsDataStore(private val context: Context) {
             buildEngineMode = BuildEngineMode.fromId(prefs[Keys.BUILD_ENGINE_MODE]),
             githubRepo = prefs[Keys.GITHUB_REPO] ?: "",
             githubToken = prefs[Keys.GITHUB_TOKEN] ?: "",
+            githubAutoCreateRepo = prefs[Keys.GITHUB_AUTO_CREATE_REPO] ?: true,
+            githubPrivateRepo = prefs[Keys.GITHUB_PRIVATE_REPO] ?: false,
             downloadFolderUri = prefs[Keys.DOWNLOAD_FOLDER_URI] ?: "",
             downloadFolderLabel = prefs[Keys.DOWNLOAD_FOLDER_LABEL] ?: "",
             serverBaseUrl = prefs[Keys.SERVER_BASE_URL] ?: "http://10.0.2.2:8000",
@@ -82,6 +89,13 @@ class SettingsDataStore(private val context: Context) {
         context.dataStore.edit {
             it[Keys.GITHUB_REPO] = repo.trim()
             it[Keys.GITHUB_TOKEN] = token.trim()
+        }
+    }
+
+    suspend fun updateGithubRepoOptions(autoCreate: Boolean, isPrivate: Boolean) {
+        context.dataStore.edit {
+            it[Keys.GITHUB_AUTO_CREATE_REPO] = autoCreate
+            it[Keys.GITHUB_PRIVATE_REPO] = isPrivate
         }
     }
 

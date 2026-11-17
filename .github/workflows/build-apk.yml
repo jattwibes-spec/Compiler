@@ -80,7 +80,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="v1.0.2"
+          TAG="v1.0.3"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist-apks/*.apk --clobber
           else

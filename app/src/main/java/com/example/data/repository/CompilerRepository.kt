@@ -15,6 +15,7 @@ import com.example.data.remote.AnalyzeRequestDto
 import com.example.data.remote.AuthRequestDto
 import com.example.data.remote.DynamicBackendClient
 import com.example.data.remote.GitHubActionsClient
+import com.example.data.remote.GitHubPushResult
 import com.example.data.remote.GitHubRepoVerification
 import com.example.data.remote.HealthResponseDto
 import com.example.data.remote.StartBuildRequestDto
@@ -101,11 +102,51 @@ class CompilerRepository(
 
     suspend fun updateBuildEngineMode(mode: BuildEngineMode) = settingsStore.updateBuildEngineMode(mode)
     suspend fun updateGithubConfig(repo: String, token: String) = settingsStore.updateGithubConfig(repo, token)
+    suspend fun updateGithubRepoOptions(autoCreate: Boolean, isPrivate: Boolean) =
+        settingsStore.updateGithubRepoOptions(autoCreate, isPrivate)
+
     suspend fun verifyGithubConfig(repo: String, token: String): Result<GitHubRepoVerification> = withContext(Dispatchers.IO) {
         runCatching {
-            val info = gitHubClient.verifyRepoAccess(repo, token)
-            settingsStore.updateGithubConfig("${info.owner}/${info.repo}", token.trim())
-            info
+            val settings = settingsStore.settingsFlow.first()
+            if (repo.isBlank() || (settings.githubAutoCreateRepo && !repo.contains("/"))) {
+                val username = gitHubClient.verifyTokenAndGetUsername(token)
+                settingsStore.updateGithubConfig(repo.trim(), token.trim())
+                GitHubRepoVerification(
+                    owner = username,
+                    repo = repo.trim().ifBlank { "auto-per-project" },
+                    defaultBranch = "main",
+                    isPrivate = settings.githubPrivateRepo
+                )
+            } else {
+                val info = gitHubClient.verifyRepoAccess(repo, token)
+                settingsStore.updateGithubConfig("${info.owner}/${info.repo}", token.trim())
+                info
+            }
+        }
+    }
+
+    suspend fun pushProjectToNewRepo(projectId: String): Result<GitHubPushResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val entity = projectDao.getProjectById(projectId)
+                ?: throw IllegalStateException("Project workspace not found.")
+            val settings = settingsStore.settingsFlow.first()
+            val token = settings.githubToken.trim()
+            if (token.isBlank()) {
+                throw IllegalStateException("Enter your GitHub Personal Access Token first.")
+            }
+            val archiveFile = entity.archivePath?.let { File(it) }
+                ?.takeIf { it.exists() }
+                ?: File(context.filesDir, "projects/$projectId/source.zip").also {
+                    archiveManager.packageWorkspaceToZip(File(entity.workspacePath), it)
+                }
+            gitHubClient.pushWorkspaceToNewRepo(
+                tokenInput = token,
+                projectName = entity.name,
+                customRepoInput = settings.githubRepo,
+                isPrivate = settings.githubPrivateRepo,
+                workspaceDir = File(entity.workspacePath),
+                archiveFile = archiveFile
+            )
         }
     }
     suspend fun updateDownloadFolder(uriString: String, label: String) = settingsStore.updateDownloadFolder(uriString, label)
@@ -318,20 +359,31 @@ class CompilerRepository(
             if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
                 val repoStr = settings.githubRepo.trim()
                 val ghToken = settings.githubToken.trim()
-                if (repoStr.isBlank() || ghToken.isBlank()) {
+                if (ghToken.isBlank()) {
                     throw IllegalStateException(
-                        "Enter your GitHub repository (owner/repo or URL) and Personal Access Token before starting a cloud build."
+                        "Enter your GitHub Personal Access Token before starting a cloud build."
+                    )
+                }
+                if (!settings.githubAutoCreateRepo && repoStr.isBlank()) {
+                    throw IllegalStateException(
+                        "Enter a GitHub repository (owner/repo) or enable Auto-Create New Repo."
                     )
                 }
                 val ghBuildId = "gh_" + UUID.randomUUID().toString().replace("-", "").take(12)
-                val (slug, runId) = gitHubClient.submitBuild(
+                val submission = gitHubClient.submitBuild(
                     repoInput = repoStr,
                     tokenInput = ghToken,
+                    autoCreateRepo = settings.githubAutoCreateRepo,
+                    isPrivateRepo = settings.githubPrivateRepo,
+                    projectName = entity.name,
                     jobId = ghBuildId,
+                    workspaceDir = File(entity.workspacePath),
                     archiveFile = archiveFile,
                     language = language,
                     config = config
                 )
+                val slug = submission.slug
+                val runId = submission.runId
                 val buildJob = BuildJobEntity(
                     buildId = ghBuildId,
                     projectId = projectId,
@@ -347,7 +399,7 @@ class CompilerRepository(
                     stageName = BuildStage.QUEUED.name,
                     progressPercent = 8,
                     dependencyStatus = "Dispatched to GitHub Actions ($slug)",
-                    logsText = "[CLOUD] Uploaded source archive to $slug (branch: wibes-builds).\n[CLOUD] Dispatched GitHub Actions build $ghBuildId.",
+                    logsText = "[CLOUD] Repository: ${submission.repoHtmlUrl}\n[CLOUD] Pushed ${submission.pushedFileCount} file(s)/archive to $slug.\n[CLOUD] Dispatched GitHub Actions build $ghBuildId.",
                     errorMessage = null,
                     outputFilePath = null,
                     outputFileSizeBytes = 0L,

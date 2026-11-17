@@ -11,10 +11,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.FilterOutputStream
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
@@ -23,6 +25,22 @@ data class GitHubRepoVerification(
     val repo: String,
     val defaultBranch: String,
     val isPrivate: Boolean
+)
+
+data class GitHubPushResult(
+    val owner: String,
+    val repo: String,
+    val defaultBranch: String,
+    val repoHtmlUrl: String,
+    val pushedFileCount: Int,
+    val usedDirectFiles: Boolean
+)
+
+data class GitHubBuildSubmission(
+    val slug: String,
+    val repoHtmlUrl: String,
+    val runId: Long?,
+    val pushedFileCount: Int
 )
 
 data class GitHubRunSnapshot(
@@ -41,8 +59,11 @@ class GitHubActionsClient(private val context: Context) {
         private const val API_BASE = "https://api.github.com"
         private const val WORKFLOW_PATH = ".github/workflows/wibes-cloud-compiler.yml"
         private const val WORKFLOW_FILENAME = "wibes-cloud-compiler.yml"
-        private const val WORKFLOW_MARKER = "# wibes-workflow-v1"
+        private const val WORKFLOW_MARKER = "# wibes-workflow-v2"
         private const val BUILD_BRANCH = "wibes-builds"
+        private const val MAX_DIRECT_TREE_FILES = 90
+        private const val MAX_SINGLE_BLOB_BYTES = 15L * 1024L * 1024L
+        private val SKIPPED_DIRS = setOf(".git", "node_modules", ".gradle", "build", "__pycache__", ".dart_tool")
     }
 
     private val client: OkHttpClient by lazy {
@@ -70,6 +91,22 @@ class GitHubActionsClient(private val context: Context) {
         return parts[0] to parts[1]
     }
 
+    fun sanitizeRepoName(raw: String): String {
+        val cleaned = raw.trim()
+            .lowercase()
+            .replace(Regex("[^a-z0-9._-]+"), "-")
+            .trim('-', '.')
+        return cleaned.ifBlank { "wibes-project" }.take(80)
+    }
+
+    fun verifyTokenAndGetUsername(tokenInput: String): String {
+        val token = tokenInput.trim()
+        require(token.isNotBlank()) { "GitHub personal access token is required." }
+        val userJson = getJson("$API_BASE/user", token)
+        return userJson.optString("login").takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Could not determine GitHub username from access token.")
+    }
+
     fun verifyRepoAccess(repoInput: String, tokenInput: String): GitHubRepoVerification {
         val token = tokenInput.trim()
         require(token.isNotBlank()) { "GitHub personal access token is required." }
@@ -87,42 +124,147 @@ class GitHubActionsClient(private val context: Context) {
         )
     }
 
+    fun createNewRepository(
+        tokenInput: String,
+        projectName: String,
+        customRepoInput: String,
+        isPrivate: Boolean
+    ): GitHubRepoVerification {
+        val token = tokenInput.trim()
+        val owner = verifyTokenAndGetUsername(token)
+
+        val baseSlug = if (customRepoInput.isNotBlank()) {
+            val rawName = customRepoInput.trim()
+                .removeSuffix("/")
+                .removeSuffix(".git")
+                .substringAfterLast("/")
+            sanitizeRepoName(rawName)
+        } else {
+            sanitizeRepoName(projectName)
+        }
+
+        // Check if repo already exists; if so, append short unique suffix so a fresh new repo is created
+        val candidateExists = runCatching {
+            getJson("$API_BASE/repos/$owner/$baseSlug", token)
+        }.isSuccess
+        val finalName = if (candidateExists) {
+            val suffix = UUID.randomUUID().toString().replace("-", "").take(4)
+            "${baseSlug.take(70)}-$suffix"
+        } else {
+            baseSlug
+        }
+
+        val payload = JSONObject().apply {
+            put("name", finalName)
+            put("private", isPrivate)
+            put("auto_init", true)
+            put("description", "Uploaded and compiled with Wibes Compiler AI")
+        }
+        val created = postJson("$API_BASE/user/repos", token, payload)
+        val defaultBranch = created.optString("default_branch", "main").ifBlank { "main" }
+
+        // Wait until GitHub finishes initializing default branch commit
+        var ready = false
+        for (attempt in 0 until 6) {
+            if (runCatching { getJson("$API_BASE/repos/$owner/$finalName/git/ref/heads/$defaultBranch", token) }.isSuccess) {
+                ready = true
+                break
+            }
+            Thread.sleep(700L)
+        }
+        if (!ready) {
+            throw IllegalStateException("Created $owner/$finalName, but initial branch '$defaultBranch' is still initializing. Please retry.")
+        }
+
+        return GitHubRepoVerification(
+            owner = owner,
+            repo = finalName,
+            defaultBranch = defaultBranch,
+            isPrivate = isPrivate
+        )
+    }
+
+    fun pushWorkspaceToNewRepo(
+        tokenInput: String,
+        projectName: String,
+        customRepoInput: String,
+        isPrivate: Boolean,
+        workspaceDir: File,
+        archiveFile: File
+    ): GitHubPushResult {
+        val token = tokenInput.trim()
+        val created = createNewRepository(token, projectName, customRepoInput, isPrivate)
+        return pushWorkspaceAndWorkflowToBranch(
+            owner = created.owner,
+            repo = created.repo,
+            branch = created.defaultBranch,
+            token = token,
+            workspaceDir = workspaceDir,
+            archiveFile = archiveFile
+        )
+    }
+
     fun submitBuild(
         repoInput: String,
         tokenInput: String,
+        autoCreateRepo: Boolean,
+        isPrivateRepo: Boolean,
+        projectName: String,
         jobId: String,
+        workspaceDir: File,
         archiveFile: File,
         language: SupportedLanguage,
         config: BuildConfiguration
-    ): Pair<String, Long?> {
+    ): GitHubBuildSubmission {
         val token = tokenInput.trim()
-        val info = verifyRepoAccess(repoInput, token)
-        val owner = info.owner
-        val repo = info.repo
-        val defaultBranch = info.defaultBranch
+        require(token.isNotBlank()) { "GitHub personal access token is required." }
 
-        // 1. Ensure cloud compiler workflow exists on default branch
-        ensureWorkflowFile(owner, repo, defaultBranch, token)
+        val owner: String
+        val repo: String
+        val dispatchBranch: String
+        val sourceBranch: String
+        val sourcePath: String
+        var pushedCount = 1
 
-        // 2. Ensure dedicated wibes-builds branch exists
-        ensureBranchExists(owner, repo, defaultBranch, BUILD_BRANCH, token)
+        if (autoCreateRepo || repoInput.isBlank()) {
+            val pushed = pushWorkspaceToNewRepo(
+                tokenInput = token,
+                projectName = projectName,
+                customRepoInput = repoInput,
+                isPrivate = isPrivateRepo,
+                workspaceDir = workspaceDir,
+                archiveFile = archiveFile
+            )
+            owner = pushed.owner
+            repo = pushed.repo
+            dispatchBranch = pushed.defaultBranch
+            sourceBranch = pushed.defaultBranch
+            sourcePath = if (pushed.usedDirectFiles) "." else "wibes-archive/source.zip"
+            pushedCount = pushed.pushedFileCount
+        } else {
+            val info = verifyRepoAccess(repoInput, token)
+            owner = info.owner
+            repo = info.repo
+            dispatchBranch = info.defaultBranch
+            ensureWorkflowFile(owner, repo, dispatchBranch, token)
+            ensureBranchExists(owner, repo, dispatchBranch, BUILD_BRANCH, token)
+            sourceBranch = BUILD_BRANCH
+            sourcePath = "wibes-builds/$jobId/source.zip"
+            uploadFileStreaming(
+                owner = owner,
+                repo = repo,
+                branch = BUILD_BRANCH,
+                repoPath = sourcePath,
+                file = archiveFile,
+                commitMessage = "build: upload workspace $jobId",
+                token = token
+            )
+        }
 
-        // 3. Upload source archive to wibes-builds/<jobId>/source.zip via streaming Base64
-        val sourcePath = "wibes-builds/$jobId/source.zip"
-        uploadFileStreaming(
-            owner = owner,
-            repo = repo,
-            branch = BUILD_BRANCH,
-            repoPath = sourcePath,
-            file = archiveFile,
-            commitMessage = "build: upload workspace $jobId",
-            token = token
-        )
-
-        // 4. Dispatch workflow_dispatch on defaultBranch
+        // Dispatch workflow_dispatch on default branch
         val inputs = JSONObject().apply {
             put("job_id", jobId)
-            put("source_branch", BUILD_BRANCH)
+            put("source_branch", sourceBranch)
             put("source_path", sourcePath)
             put("language", language.id)
             put("output_format", config.outputFormat.id)
@@ -135,7 +277,7 @@ class GitHubActionsClient(private val context: Context) {
             put("target_sdk", config.targetSdk.toString())
         }
         val dispatchPayload = JSONObject().apply {
-            put("ref", defaultBranch)
+            put("ref", dispatchBranch)
             put("inputs", inputs)
         }
         postJson(
@@ -149,7 +291,190 @@ class GitHubActionsClient(private val context: Context) {
             findRunIdForJob(owner, repo, token, jobId)
         }.getOrNull()
 
-        return "$owner/$repo" to runId
+        return GitHubBuildSubmission(
+            slug = "$owner/$repo",
+            repoHtmlUrl = "https://github.com/$owner/$repo",
+            runId = runId,
+            pushedFileCount = pushedCount
+        )
+    }
+
+    private fun pushWorkspaceAndWorkflowToBranch(
+        owner: String,
+        repo: String,
+        branch: String,
+        token: String,
+        workspaceDir: File,
+        archiveFile: File
+    ): GitHubPushResult {
+        val refJson = getJson("$API_BASE/repos/$owner/$repo/git/ref/heads/$branch", token)
+        val baseCommitSha = refJson.getJSONObject("object").getString("sha")
+        val commitJson = getJson("$API_BASE/repos/$owner/$repo/git/commits/$baseCommitSha", token)
+        val baseTreeSha = commitJson.getJSONObject("tree").getString("sha")
+
+        // Unwrap single top-level directory inside workspaceDir if present
+        val effectiveRoot = unwrapSingleRootDir(workspaceDir)
+        val collected = collectUploadableFiles(effectiveRoot)
+        val useDirectFiles = collected.isNotEmpty() && collected.size <= MAX_DIRECT_TREE_FILES
+
+        val treeItems = JSONArray()
+        var pushedCount = 0
+
+        if (useDirectFiles) {
+            for ((relPath, file) in collected) {
+                if (file.length() > MAX_SINGLE_BLOB_BYTES) continue
+                val blobSha = createGitBlobStreaming(owner, repo, token, file)
+                treeItems.put(
+                    JSONObject().apply {
+                        put("path", relPath)
+                        put("mode", "100644")
+                        put("type", "blob")
+                        put("sha", blobSha)
+                    }
+                )
+                pushedCount++
+            }
+        }
+
+        // Also push the uploaded source ZIP cleanly so the archive itself is preserved in the repo
+        if (archiveFile.exists() && archiveFile.length() in 1L..MAX_SINGLE_BLOB_BYTES) {
+            val zipBlobSha = createGitBlobStreaming(owner, repo, token, archiveFile)
+            treeItems.put(
+                JSONObject().apply {
+                    put("path", "wibes-archive/source.zip")
+                    put("mode", "100644")
+                    put("type", "blob")
+                    put("sha", zipBlobSha)
+                }
+            )
+            pushedCount++
+        }
+
+        // Include workflow YAML in the same commit
+        val yamlBytes = context.assets.open(WORKFLOW_FILENAME).use { it.readBytes() }
+        val wfBlobSha = createGitBlobBytes(owner, repo, token, yamlBytes)
+        treeItems.put(
+            JSONObject().apply {
+                put("path", WORKFLOW_PATH)
+                put("mode", "100644")
+                put("type", "blob")
+                put("sha", wfBlobSha)
+            }
+        )
+
+        val treePayload = JSONObject().apply {
+            put("base_tree", baseTreeSha)
+            put("tree", treeItems)
+        }
+        val newTreeSha = postJson("$API_BASE/repos/$owner/$repo/git/trees", token, treePayload)
+            .getString("sha")
+
+        val newCommitPayload = JSONObject().apply {
+            put("message", "feat: push uploaded project files and ZIP via Wibes Compiler AI")
+            put("tree", newTreeSha)
+            put("parents", JSONArray().put(baseCommitSha))
+        }
+        val newCommitSha = postJson("$API_BASE/repos/$owner/$repo/git/commits", token, newCommitPayload)
+            .getString("sha")
+
+        patchJson(
+            "$API_BASE/repos/$owner/$repo/git/refs/heads/$branch",
+            token,
+            JSONObject().apply {
+                put("sha", newCommitSha)
+                put("force", false)
+            }
+        )
+
+        return GitHubPushResult(
+            owner = owner,
+            repo = repo,
+            defaultBranch = branch,
+            repoHtmlUrl = "https://github.com/$owner/$repo",
+            pushedFileCount = pushedCount,
+            usedDirectFiles = useDirectFiles
+        )
+    }
+
+    private fun unwrapSingleRootDir(workspaceDir: File): File {
+        var current = workspaceDir
+        while (true) {
+            val children = current.listFiles()?.filter { it.name != "__MACOSX" } ?: break
+            if (children.size == 1 && children[0].isDirectory && children[0].name !in SKIPPED_DIRS) {
+                current = children[0]
+            } else {
+                break
+            }
+        }
+        return current
+    }
+
+    private fun collectUploadableFiles(root: File): List<Pair<String, File>> {
+        val result = mutableListOf<Pair<String, File>>()
+        fun walk(dir: File) {
+            val entries = dir.listFiles() ?: return
+            for (entry in entries) {
+                if (entry.name in SKIPPED_DIRS || entry.name == "__MACOSX") continue
+                if (entry.isDirectory) {
+                    walk(entry)
+                } else if (entry.isFile) {
+                    val rel = entry.relativeTo(root).path.replace(File.separatorChar, '/')
+                    if (rel.isNotBlank() && !rel.startsWith(".github/")) {
+                        result += rel to entry
+                    }
+                }
+            }
+        }
+        walk(root)
+        return result
+    }
+
+    private fun createGitBlobBytes(owner: String, repo: String, token: String, bytes: ByteArray): String {
+        val payload = JSONObject().apply {
+            put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+            put("encoding", "base64")
+        }
+        return postJson("$API_BASE/repos/$owner/$repo/git/blobs", token, payload).getString("sha")
+    }
+
+    private fun createGitBlobStreaming(owner: String, repo: String, token: String, file: File): String {
+        val tempPayload = File(context.cacheDir, "gh_blob_${System.currentTimeMillis()}.json")
+        try {
+            FileOutputStream(tempPayload).use { fos ->
+                fos.write("{\"encoding\":\"base64\",\"content\":\"".toByteArray(Charsets.UTF_8))
+                val nonClosing = object : FilterOutputStream(fos) {
+                    override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+                    override fun close() = out.flush()
+                }
+                Base64OutputStream(nonClosing, Base64.NO_WRAP).use { b64 ->
+                    file.inputStream().use { inp ->
+                        val buf = ByteArray(16384)
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n <= 0) break
+                            b64.write(buf, 0, n)
+                        }
+                    }
+                }
+                fos.write("\"}".toByteArray(Charsets.UTF_8))
+                fos.flush()
+            }
+            val req = Request.Builder()
+                .url("$API_BASE/repos/$owner/$repo/git/blobs")
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "application/vnd.github+json")
+                .post(tempPayload.asRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException(parseGitHubError(resp.code, body))
+                }
+                return JSONObject(body).getString("sha")
+            }
+        } finally {
+            tempPayload.delete()
+        }
     }
 
     fun findRunIdForJob(owner: String, repo: String, token: String, jobId: String): Long? {
@@ -185,7 +510,8 @@ class GitHubActionsClient(private val context: Context) {
 
         val stepLogs = StringBuilder()
         stepLogs.appendLine("[CLOUD] GitHub Actions Run #$runId ($owner/$repo)")
-        if (htmlUrl != null) stepLogs.appendLine("[CLOUD] URL: $htmlUrl")
+        stepLogs.appendLine("[CLOUD] Repo: https://github.com/$owner/$repo")
+        if (htmlUrl != null) stepLogs.appendLine("[CLOUD] Run URL: $htmlUrl")
 
         var completedSteps = 0
         val totalSteps = steps?.length() ?: 0
@@ -406,15 +732,9 @@ class GitHubActionsClient(private val context: Context) {
                     append(",\"content\":\"")
                 }
                 fos.write(header.toByteArray(Charsets.UTF_8))
-
-                // Wrap fos so Base64OutputStream.close() flushes padding without closing fos
                 val nonClosing = object : FilterOutputStream(fos) {
-                    override fun write(b: ByteArray, off: Int, len: Int) {
-                        out.write(b, off, len)
-                    }
-                    override fun close() {
-                        out.flush()
-                    }
+                    override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+                    override fun close() = out.flush()
                 }
                 Base64OutputStream(nonClosing, Base64.NO_WRAP).use { b64 ->
                     file.inputStream().use { inp ->
@@ -509,12 +829,28 @@ class GitHubActionsClient(private val context: Context) {
         }
     }
 
+    private fun patchJson(url: String, token: String, payload: JSONObject): JSONObject {
+        val req = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $token")
+            .header("Accept", "application/vnd.github+json")
+            .patch(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException(parseGitHubError(resp.code, body))
+            }
+            return if (body.isBlank()) JSONObject() else JSONObject(body)
+        }
+    }
+
     private fun parseGitHubError(code: Int, body: String): String {
         val msg = runCatching { JSONObject(body).optString("message") }.getOrNull().orEmpty()
         return when (code) {
             401 -> "GitHub authentication failed (401): check your Personal Access Token."
             403 -> "GitHub permission denied (403): ensure your token has 'repo' and 'workflow' scopes. ($msg)"
-            404 -> "GitHub repository or workflow not found (404): verify owner/repo and token access. ($msg)"
+            404 -> "GitHub repository or workflow not found (404): verify repo access and token permissions. ($msg)"
             422 -> "GitHub rejected request (422): $msg"
             else -> "GitHub API error ($code): ${msg.ifBlank { body.take(200) }}"
         }

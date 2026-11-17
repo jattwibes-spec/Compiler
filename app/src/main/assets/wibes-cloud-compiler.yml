@@ -1,4 +1,4 @@
-# wibes-workflow-v1
+# wibes-workflow-v2
 name: Wibes Cloud Compiler
 
 on:
@@ -9,13 +9,14 @@ on:
         required: true
         type: string
       source_branch:
-        description: Branch holding uploaded source archive
+        description: Branch holding uploaded source files or archive
         required: true
-        default: wibes-builds
+        default: main
         type: string
       source_path:
-        description: Path to uploaded source.zip in source_branch
+        description: Path to source.zip or '.' when files are pushed directly
         required: true
+        default: "."
         type: string
       language:
         description: Detected language ID
@@ -82,7 +83,22 @@ jobs:
         shell: bash
         run: |
           mkdir -p build_src wibes_out
-          unzip -q "${{ inputs.source_path }}" -d build_src
+          SRC_PATH="${{ inputs.source_path }}"
+          if [ "$SRC_PATH" = "." ]; then
+            shopt -s dotglob
+            for item in *; do
+              [ "$item" = ".git" ] && continue
+              [ "$item" = ".github" ] && continue
+              [ "$item" = "build_src" ] && continue
+              [ "$item" = "wibes_out" ] && continue
+              [ "$item" = "wibes-archive" ] && continue
+              cp -r "$item" build_src/ 2>/dev/null || true
+            done
+            shopt -u dotglob
+          else
+            unzip -q "$SRC_PATH" -d build_src
+          fi
+
           # Unwrap single top-level folder if the ZIP wrapped everything in one directory
           shopt -s dotglob
           ENTRIES=(build_src/*)

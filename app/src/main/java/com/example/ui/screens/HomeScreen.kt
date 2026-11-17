@@ -131,7 +131,7 @@ fun HomeScreen(
                         }
 
                         val isGithubReady = settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS &&
-                            settings.githubRepo.isNotBlank() && settings.githubToken.isNotBlank()
+                            settings.githubToken.isNotBlank() && (settings.githubAutoCreateRepo || settings.githubRepo.isNotBlank())
                         val isOnline = isGithubReady ||
                             (settings.buildEngineMode == BuildEngineMode.FASTAPI_BACKEND && backendHealth is BackendHealthState.Online)
                         val pillLabel = when {

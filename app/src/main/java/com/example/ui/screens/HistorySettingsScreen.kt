@@ -44,6 +44,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -84,6 +85,7 @@ fun HistorySettingsScreen(
     formatBytes: (Long) -> String,
     onUpdateBuildEngineMode: (BuildEngineMode) -> Unit,
     onSaveAndVerifyGithub: (String, String) -> Unit,
+    onUpdateGithubRepoOptions: (Boolean, Boolean) -> Unit,
     onUpdateDownloadFolder: (String, String) -> Unit,
     onClearDownloadFolder: () -> Unit,
     onUpdateServerUrl: (String) -> Unit,
@@ -204,8 +206,8 @@ fun HistorySettingsScreen(
                     OutlinedTextField(
                         value = githubRepoInput,
                         onValueChange = { githubRepoInput = it },
-                        label = { Text("GitHub Repository (owner/repo or URL)") },
-                        placeholder = { Text("https://github.com/username/my-compiler") },
+                        label = { Text(if (settings.githubAutoCreateRepo) "New Repo Name (optional, auto-named if blank)" else "GitHub Repository (owner/repo or URL)") },
+                        placeholder = { Text(if (settings.githubAutoCreateRepo) "leave blank to auto-name from project" else "https://github.com/username/my-compiler") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("github_repo_input")
                     )
@@ -214,18 +216,48 @@ fun HistorySettingsScreen(
                         value = githubTokenInput,
                         onValueChange = { githubTokenInput = it },
                         label = { Text("GitHub Personal Access Token") },
-                        supportingText = { Text("Requires repo + workflow scopes. Compiles Android, Flutter, Web-to-APK, Python & C/C++ over mobile data.") },
+                        supportingText = { Text("Requires repo + workflow scopes. Automatically creates a repo (if enabled), pushes your uploaded folder & ZIP, and compiles APKs.") },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("github_token_input")
                     )
                     Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Auto-create new repo per project", style = MaterialTheme.typography.labelLarge)
+                            Text("Creates a new repo on your account & pushes uploaded folder + ZIP", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = settings.githubAutoCreateRepo,
+                            onCheckedChange = { onUpdateGithubRepoOptions(it, settings.githubPrivateRepo) }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Private repository", style = MaterialTheme.typography.labelLarge)
+                            Text("Public repos get unlimited free GitHub Actions minutes", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = settings.githubPrivateRepo,
+                            onCheckedChange = { onUpdateGithubRepoOptions(settings.githubAutoCreateRepo, it) }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
                     Button(
                         onClick = { onSaveAndVerifyGithub(githubRepoInput, githubTokenInput) },
-                        enabled = githubRepoInput.isNotBlank() && githubTokenInput.isNotBlank() && githubStatus !is GithubStatusState.Verifying,
+                        enabled = githubTokenInput.isNotBlank() && (settings.githubAutoCreateRepo || githubRepoInput.isNotBlank()) && githubStatus !is GithubStatusState.Verifying,
                         modifier = Modifier.fillMaxWidth().height(48.dp).testTag("save_verify_github_button")
                     ) {
-                        Text(if (githubStatus is GithubStatusState.Verifying) "Verifying..." else "Save & Verify GitHub Repo")
+                        Text(if (githubStatus is GithubStatusState.Verifying) "Verifying..." else "Save & Verify GitHub Access")
                     }
                     if (githubStatus is GithubStatusState.Error) {
                         Spacer(modifier = Modifier.height(8.dp))
