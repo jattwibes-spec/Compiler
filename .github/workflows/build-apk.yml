@@ -64,7 +64,7 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD != '' && secrets.STORE_PASSWORD || 'wibescompiler2026' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD != '' && secrets.KEY_PASSWORD || 'wibescompiler2026' }}
         run: |
-          gradle assembleRelease assembleDebug --no-daemon --stacktrace
+          gradle testDebugUnitTest assembleRelease assembleDebug --no-daemon --stacktrace
           mkdir -p dist-apks
           cp app/build/outputs/apk/release/*.apk dist-apks/WibesCompilerAI-release.apk
           cp app/build/outputs/apk/debug/*.apk dist-apks/WibesCompilerAI-debug.apk
@@ -80,7 +80,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="v1.0.0"
+          TAG="v1.0.1"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist-apks/*.apk --clobber
           else

@@ -300,6 +300,9 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                                 aiTaskState = aiTaskState,
                                 backups = backups,
                                 chatMessages = chatMessages,
+                                geminiApiKey = settings.geminiApiKey,
+                                isFirebaseAiConfigured = viewModel.isFirebaseAiConfigured,
+                                onSaveGeminiApiKey = viewModel::updateGeminiApiKey,
                                 onAnalyzeCode = { viewModel.runAiProjectDiagnosis() },
                                 onDiagnoseBuildError = { logs -> viewModel.runAiProjectDiagnosis(logs) },
                                 onApplyPatchWithBackup = viewModel::applyAiModificationWithBackup,
@@ -311,11 +314,13 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                         composable(ROUTE_HISTORY_SETTINGS) {
                             HistorySettingsScreen(
                                 settings = settings,
+                                isFirebaseAiConfigured = viewModel.isFirebaseAiConfigured,
                                 backendHealth = backendHealth,
                                 projects = projects,
                                 builds = builds,
                                 formatBytes = viewModel::formatBytes,
                                 onUpdateServerUrl = viewModel::updateServerUrl,
+                                onUpdateGeminiApiKey = viewModel::updateGeminiApiKey,
                                 onCheckHealth = viewModel::checkBackendHealth,
                                 onRegisterUser = viewModel::registerBackendUser,
                                 onLoginUser = viewModel::loginBackendUser,

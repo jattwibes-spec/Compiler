@@ -3,6 +3,8 @@ package com.example.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -23,6 +26,7 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -59,14 +63,17 @@ import com.example.ui.theme.ThemeMode
 import com.example.ui.viewmodel.BackendHealthState
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HistorySettingsScreen(
     settings: CompilerSettings,
+    isFirebaseAiConfigured: Boolean,
     backendHealth: BackendHealthState,
     projects: List<ProjectEntity>,
     builds: List<BuildJobEntity>,
     formatBytes: (Long) -> String,
     onUpdateServerUrl: (String) -> Unit,
+    onUpdateGeminiApiKey: (String) -> Unit,
     onCheckHealth: () -> Unit,
     onRegisterUser: (String, String) -> Unit,
     onLoginUser: (String, String) -> Unit,
@@ -81,6 +88,7 @@ fun HistorySettingsScreen(
     modifier: Modifier = Modifier
 ) {
     var serverUrlInput by remember(settings.serverBaseUrl) { mutableStateOf(settings.serverBaseUrl) }
+    var geminiKeyInput by remember(settings.geminiApiKey) { mutableStateOf(settings.geminiApiKey) }
     var usernameInput by remember { mutableStateOf(settings.username) }
     var passwordInput by remember { mutableStateOf("") }
 
@@ -139,13 +147,31 @@ fun HistorySettingsScreen(
                         value = serverUrlInput,
                         onValueChange = { serverUrlInput = it },
                         label = { Text("Backend Base URL") },
-                        supportingText = { Text("Emulator loopback: http://10.0.2.2:8000 or HTTPS server URL") },
+                        supportingText = { Text("Phone: use PC LAN IP (http://192.168.x.x:8000), ADB USB (http://127.0.0.1:8000), or HTTPS URL. 10.0.2.2 is emulator-only.") },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("server_url_input")
                     )
 
+                    Spacer(modifier = Modifier.height(6.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        AssistChip(
+                            onClick = { serverUrlInput = "http://127.0.0.1:8000" },
+                            label = { Text("ADB USB (127.0.0.1:8000)") }
+                        )
+                        AssistChip(
+                            onClick = { serverUrlInput = "http://192.168.1.100:8000" },
+                            label = { Text("LAN IP Template") }
+                        )
+                        AssistChip(
+                            onClick = { serverUrlInput = "http://10.0.2.2:8000" },
+                            label = { Text("Emulator (10.0.2.2)") }
+                        )
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
@@ -172,10 +198,71 @@ fun HistorySettingsScreen(
                     if (backendHealth is BackendHealthState.Unreachable) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Status: ${backendHealth.error}. Deploy the included /backend FastAPI + Docker + Celery stack to enable isolated remote compilation.",
+                            text = "Status: ${backendHealth.error}\nTip: Run `/backend` (`docker compose up --build`), or over USB run `adb reverse tcp:8000 tcp:8000` and connect to `http://127.0.0.1:8000`.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+
+            // Built-in Gemini AI Configuration
+            item {
+                SectionCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Text("Built-in Gemini AI Engine", style = MaterialTheme.typography.titleMedium)
+                        }
+                        val aiModeLabel = when {
+                            settings.geminiApiKey.isNotBlank() -> "Cloud Gemini 2.5 Flash"
+                            isFirebaseAiConfigured -> "Firebase AI Logic"
+                            else -> "Offline Diagnostics"
+                        }
+                        Text(
+                            text = aiModeLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (settings.geminiApiKey.isNotBlank() || isFirebaseAiConfigured) StatusSuccess else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = geminiKeyInput,
+                        onValueChange = { geminiKeyInput = it },
+                        label = { Text("Google AI Studio Gemini API Key") },
+                        supportingText = {
+                            Text("Optional: paste an AIza... key for full cloud Gemini 2.5 Flash code repair & chat without Firebase setup. Offline diagnostics work automatically without a key.")
+                        },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("gemini_api_key_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { onUpdateGeminiApiKey(geminiKeyInput) },
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("save_gemini_key_button")
+                        ) {
+                            Text("Save AI Key")
+                        }
+                        if (settings.geminiApiKey.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = {
+                                    geminiKeyInput = ""
+                                    onUpdateGeminiApiKey("")
+                                },
+                                modifier = Modifier.height(48.dp)
+                            ) {
+                                Text("Clear")
+                            }
+                        }
                     }
                 }
             }

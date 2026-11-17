@@ -2,7 +2,11 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.ai.CompilerAiRepository
 import com.example.data.local.ProjectAnalyzerEngine
+import com.example.data.local.SettingsDataStore
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import com.example.domain.OutputFormat
 import com.example.domain.ProjectFileEntry
 import com.example.domain.SupportedLanguage
@@ -92,5 +96,37 @@ class ExampleRobolectricTest {
         assertEquals("lib/main.dart", flResult.entryPoint)
         assertTrue(OutputFormat.AAB in flResult.compatibleOutputs)
         flutterDir.deleteRecursively()
+    }
+    @Test
+    fun `offline AI diagnostics works without Firebase initialization`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tempDir = File(System.getProperty("java.tmpdir"), "wibes_test_ai").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        File(tempDir, "main.py").writeText("print(123)")
+        val engine = ProjectAnalyzerEngine()
+        val analysis = engine.analyzeWorkspace(
+            projectId = "ai1",
+            projectName = "AiDemo",
+            sourceType = "ZIP",
+            workspaceDir = tempDir,
+            files = listOf(ProjectFileEntry("main.py", 10)),
+            totalSizeBytes = 10,
+            sha256Checksum = "xyz",
+            zipSecurityPassed = true,
+            securityNotes = emptyList()
+        )
+        val aiRepo = CompilerAiRepository(context, SettingsDataStore(context))
+        val diag = aiRepo.analyzeProjectAndSuggestFixes(
+            analysis = analysis,
+            sourceContext = "print(123)",
+            compilerErrorLogs = "Failed to connect to /10.0.2.2:8080"
+        )
+        assertTrue(diag.summary.contains("Offline Local Diagnostics"))
+        assertTrue(diag.detectedErrors.any { it.contains("10.0.2.2") })
+        val reply = aiRepo.streamDeveloperAssistant("Why did 10.0.2.2 fail?", analysis, "print(123)", null).first()
+        assertTrue(reply.contains("10.0.2.2"))
+        tempDir.deleteRecursively()
     }
 }

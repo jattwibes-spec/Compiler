@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.local.BuildJobEntity
@@ -69,6 +70,9 @@ fun AiAssistantScreen(
     aiTaskState: AiTaskState,
     backups: List<FileBackupEntity>,
     chatMessages: List<ChatMessage>,
+    geminiApiKey: String,
+    isFirebaseAiConfigured: Boolean,
+    onSaveGeminiApiKey: (String) -> Unit,
     onAnalyzeCode: () -> Unit,
     onDiagnoseBuildError: (String?) -> Unit,
     onApplyPatchWithBackup: (relativePath: String, content: String, reason: String) -> Unit,
@@ -77,6 +81,7 @@ fun AiAssistantScreen(
     modifier: Modifier = Modifier
 ) {
     var chatInput by remember { mutableStateOf("") }
+    var quickKeyInput by remember(geminiApiKey) { mutableStateOf(geminiApiKey) }
     val dateFmt = SimpleDateFormat("MMM dd HH:mm:ss", Locale.getDefault())
 
     Box(
@@ -101,11 +106,22 @@ fun AiAssistantScreen(
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary
                         )
-                        Text(
-                            text = "Gemini Compiler Assistant",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Column {
+                            Text(
+                                text = "Gemini Compiler Assistant",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = when {
+                                    geminiApiKey.isNotBlank() -> "Engine: Cloud Gemini 2.5 Flash (API Key)"
+                                    isFirebaseAiConfigured -> "Engine: Firebase AI Logic (Gemini 2.5 Flash)"
+                                    else -> "Engine: Built-in Offline Diagnostics (Add API key below for Cloud Gemini)"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -118,6 +134,31 @@ fun AiAssistantScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
+
+                    if (geminiApiKey.isBlank() && !isFirebaseAiConfigured) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = quickKeyInput,
+                                onValueChange = { quickKeyInput = it },
+                                label = { Text("Gemini API Key (optional for Cloud AI)") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(
+                                onClick = { onSaveGeminiApiKey(quickKeyInput) },
+                                enabled = quickKeyInput.isNotBlank(),
+                                modifier = Modifier.height(48.dp)
+                            ) {
+                                Text("Save")
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),

@@ -76,7 +76,8 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
         analyzerEngine = analyzerEngine,
         backendClient = backendClient
     )
-    private val aiRepository = CompilerAiRepository()
+    private val aiRepository = CompilerAiRepository(application, settingsStore)
+    val isFirebaseAiConfigured: Boolean get() = aiRepository.isFirebaseInitialized()
 
     val settings: StateFlow<CompilerSettings> = repository.settingsFlow.stateIn(
         viewModelScope,
@@ -278,7 +279,7 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
                     _pipelineStep.value = PipelineStep.COMPILE
                 }
                 .onFailure { err ->
-                    _statusBanner.value = err.localizedMessage ?: "Failed to start remote build."
+                    _statusBanner.value = repository.formatConnectionError(settings.value.serverBaseUrl, err)
                     // If a local failure record was created, jump to Compile screen to display real logs
                     val latest = builds.value.firstOrNull { it.projectId == analysis.projectId }
                     if (latest != null) {
@@ -475,6 +476,17 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             repository.logoutBackendUser()
             _statusBanner.value = "Signed out from build backend."
+        }
+    }
+
+    fun updateGeminiApiKey(apiKey: String) {
+        viewModelScope.launch {
+            repository.updateGeminiApiKey(apiKey)
+            _statusBanner.value = if (apiKey.isBlank()) {
+                "Gemini API key cleared (using Offline Local Diagnostics unless Firebase is configured)."
+            } else {
+                "Gemini API key saved (Cloud Gemini 2.5 Flash enabled)."
+            }
         }
     }
 

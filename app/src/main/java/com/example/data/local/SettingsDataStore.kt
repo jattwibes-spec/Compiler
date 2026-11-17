@@ -17,16 +17,19 @@ data class CompilerSettings(
     val serverBaseUrl: String = "http://10.0.2.2:8000",
     val authToken: String = "",
     val username: String = "",
+    val geminiApiKey: String = "",
     val maxUploadSizeMb: Int = 100,
     val maxConcurrentBuilds: Int = 2,
     val themeMode: ThemeMode = ThemeMode.SYSTEM
 )
 
 class SettingsDataStore(private val context: Context) {
+
     private object Keys {
         val SERVER_BASE_URL = stringPreferencesKey("server_base_url")
         val AUTH_TOKEN = stringPreferencesKey("auth_token")
         val USERNAME = stringPreferencesKey("username")
+        val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
         val MAX_UPLOAD_SIZE_MB = intPreferencesKey("max_upload_size_mb")
         val MAX_CONCURRENT_BUILDS = intPreferencesKey("max_concurrent_builds")
         val THEME_MODE = stringPreferencesKey("theme_mode")
@@ -39,6 +42,7 @@ class SettingsDataStore(private val context: Context) {
             serverBaseUrl = prefs[Keys.SERVER_BASE_URL] ?: "http://10.0.2.2:8000",
             authToken = prefs[Keys.AUTH_TOKEN] ?: "",
             username = prefs[Keys.USERNAME] ?: "",
+            geminiApiKey = prefs[Keys.GEMINI_API_KEY] ?: "",
             maxUploadSizeMb = (prefs[Keys.MAX_UPLOAD_SIZE_MB] ?: 100).coerceIn(10, 500),
             maxConcurrentBuilds = (prefs[Keys.MAX_CONCURRENT_BUILDS] ?: 2).coerceIn(1, 4),
             themeMode = theme
@@ -62,6 +66,10 @@ class SettingsDataStore(private val context: Context) {
             it[Keys.AUTH_TOKEN] = ""
             it[Keys.USERNAME] = ""
         }
+    }
+
+    suspend fun updateGeminiApiKey(apiKey: String) {
+        context.dataStore.edit { it[Keys.GEMINI_API_KEY] = apiKey.trim() }
     }
 
     suspend fun updateMaxUploadSizeMb(sizeMb: Int) {

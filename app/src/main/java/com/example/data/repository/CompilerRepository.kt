@@ -60,10 +60,12 @@ class CompilerRepository(
     }
 
     suspend fun checkBackendHealth(): Result<HealthResponseDto> = withContext(Dispatchers.IO) {
+        val settings = settingsStore.settingsFlow.first()
         runCatching {
-            val settings = settingsStore.settingsFlow.first()
             val api = backendClient.createService(settings.serverBaseUrl, settings.authToken)
             api.checkHealth()
+        }.recoverCatching { err ->
+            throw IllegalStateException(formatConnectionError(settings.serverBaseUrl, err), err)
         }
     }
 
@@ -94,6 +96,7 @@ class CompilerRepository(
     }
 
     suspend fun updateServerBaseUrl(url: String) = settingsStore.updateServerBaseUrl(url)
+    suspend fun updateGeminiApiKey(apiKey: String) = settingsStore.updateGeminiApiKey(apiKey)
     suspend fun updateMaxUploadSizeMb(mb: Int) = settingsStore.updateMaxUploadSizeMb(mb)
     suspend fun updateMaxConcurrentBuilds(limit: Int) = settingsStore.updateMaxConcurrentBuilds(limit)
     suspend fun updateThemeMode(mode: com.example.ui.theme.ThemeMode) = settingsStore.updateThemeMode(mode)
@@ -378,8 +381,8 @@ class CompilerRepository(
                         stageName = BuildStage.FAILED.name,
                         progressPercent = 0,
                         dependencyStatus = "Backend unreachable or authentication required",
-                        logsText = "[ERROR] Failed to submit build to remote FastAPI backend.\n[ERROR] ${error.localizedMessage ?: error.javaClass.simpleName}\n[HINT] Verify your FastAPI Build Backend URL and Sign-In token in the Server & History tab.",
-                        errorMessage = error.localizedMessage ?: "Backend connection failed",
+                        logsText = "[ERROR] Failed to submit build to remote FastAPI backend.\n[ERROR] " + formatConnectionError(settingsStore.settingsFlow.first().serverBaseUrl, error) + "\n[HINT] Verify your FastAPI Build Backend URL and Sign-In token in the Server & History tab.",
+                        errorMessage = formatConnectionError(settingsStore.settingsFlow.first().serverBaseUrl, error),
                         outputFilePath = null,
                         outputFileSizeBytes = 0L,
                         outputSha256 = null,
@@ -443,4 +446,19 @@ class CompilerRepository(
     }
 
     fun formatBytes(bytes: Long): String = archiveManager.formatBytes(bytes)
+
+    fun formatConnectionError(serverUrl: String, error: Throwable): String {
+        val raw = error.localizedMessage ?: error.javaClass.simpleName
+        val isNetworkError = error is java.net.ConnectException ||
+            error is java.net.UnknownHostException ||
+            error is java.net.SocketTimeoutException ||
+            raw.contains("Failed to connect", ignoreCase = true) ||
+            raw.contains("ECONNREFUSED", ignoreCase = true)
+        if (!isNetworkError) return raw
+        return if (serverUrl.contains("10.0.2.2")) {
+            "Cannot reach $serverUrl. Note: 10.0.2.2 only works on the Android Emulator. On a physical phone, open the Server tab and set your computer's LAN IP (e.g. http://192.168.1.x:8000), ADB reverse (http://127.0.0.1:8000), or a hosted HTTPS backend URL."
+        } else {
+            "Cannot reach build server at $serverUrl ($raw). Ensure the /backend FastAPI + Docker stack is running and reachable."
+        }
+    }
 }
