@@ -136,6 +136,9 @@ class ExampleRobolectricTest {
         val gh = GitHubActionsClient(context)
         assertEquals("octo" to "demo", gh.normalizeRepoSlug("https://github.com/octo/demo.git"))
         assertEquals("octo" to "demo", gh.normalizeRepoSlug("octo/demo"))
+        assertEquals("jattwibes-spec" to "demo", gh.normalizeRepoSlug("demo", defaultOwner = "@jattwibes-spec"))
+        assertEquals("jattwibes-spec", gh.normalizeUsername("https://github.com/jattwibes-spec/"))
+        assertEquals("ghp_abc123", gh.cleanToken("  Bearer ghp_abc123  "))
         assertEquals("my-cool-app", gh.sanitizeRepoName("My Cool App!"))
     }
 }

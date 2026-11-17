@@ -20,11 +20,20 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
+data class GitHubAccountVerification(
+    val login: String,
+    val targetOwner: String,
+    val isOrganization: Boolean,
+    val scopes: List<String>
+)
+
 data class GitHubRepoVerification(
     val owner: String,
     val repo: String,
     val defaultBranch: String,
-    val isPrivate: Boolean
+    val isPrivate: Boolean,
+    val accountLogin: String = owner,
+    val autoCreateMode: Boolean = false
 )
 
 data class GitHubPushResult(
@@ -38,6 +47,7 @@ data class GitHubPushResult(
 
 data class GitHubBuildSubmission(
     val slug: String,
+    val accountLogin: String,
     val repoHtmlUrl: String,
     val runId: Long?,
     val pushedFileCount: Int
@@ -57,13 +67,17 @@ class GitHubActionsClient(private val context: Context) {
 
     companion object {
         private const val API_BASE = "https://api.github.com"
+        private const val API_VERSION = "2022-11-28"
+        private const val USER_AGENT = "WibesCompilerAI-Android"
         private const val WORKFLOW_PATH = ".github/workflows/wibes-cloud-compiler.yml"
         private const val WORKFLOW_FILENAME = "wibes-cloud-compiler.yml"
         private const val WORKFLOW_MARKER = "# wibes-workflow-v2"
         private const val BUILD_BRANCH = "wibes-builds"
-        private const val MAX_DIRECT_TREE_FILES = 90
-        private const val MAX_SINGLE_BLOB_BYTES = 15L * 1024L * 1024L
-        private val SKIPPED_DIRS = setOf(".git", "node_modules", ".gradle", "build", "__pycache__", ".dart_tool")
+        private const val MAX_DIRECT_TREE_FILES = 200
+        private const val MAX_SINGLE_BLOB_BYTES = 25L * 1024L * 1024L
+        private val SKIPPED_DIRS = setOf(
+            ".git", "node_modules", ".gradle", "build", "__pycache__", ".dart_tool", ".idea"
+        )
     }
 
     private val client: OkHttpClient by lazy {
@@ -75,7 +89,22 @@ class GitHubActionsClient(private val context: Context) {
             .build()
     }
 
-    fun normalizeRepoSlug(raw: String): Pair<String, String> {
+    fun cleanToken(raw: String): String = raw
+        .trim()
+        .removePrefix("Bearer ")
+        .removePrefix("bearer ")
+        .removePrefix("token ")
+        .trim()
+
+    fun normalizeUsername(raw: String): String {
+        var cleaned = raw.trim().removePrefix("@").trim('/')
+        if (cleaned.contains("github.com/")) {
+            cleaned = cleaned.substringAfter("github.com/").substringBefore("/")
+        }
+        return cleaned.trim()
+    }
+
+    fun normalizeRepoSlug(raw: String, defaultOwner: String = ""): Pair<String, String> {
         var cleaned = raw.trim()
             .removeSuffix("/")
             .removeSuffix(".git")
@@ -85,10 +114,16 @@ class GitHubActionsClient(private val context: Context) {
             cleaned = cleaned.substringAfter("github.com/")
         }
         val parts = cleaned.split("/").filter { it.isNotBlank() }
-        require(parts.size >= 2) {
-            "Invalid GitHub repository. Enter 'owner/repo' or 'https://github.com/owner/repo'."
+        if (parts.size >= 2) {
+            return parts[0] to parts[1]
         }
-        return parts[0] to parts[1]
+        val cleanDefault = normalizeUsername(defaultOwner)
+        if (parts.size == 1 && cleanDefault.isNotBlank()) {
+            return cleanDefault to parts[0]
+        }
+        throw IllegalArgumentException(
+            "Invalid GitHub repository. Enter 'owner/repo', a GitHub URL, or set your GitHub Username."
+        )
     }
 
     fun sanitizeRepoName(raw: String): String {
@@ -99,39 +134,191 @@ class GitHubActionsClient(private val context: Context) {
         return cleaned.ifBlank { "wibes-project" }.take(80)
     }
 
-    fun verifyTokenAndGetUsername(tokenInput: String): String {
-        val token = tokenInput.trim()
-        require(token.isNotBlank()) { "GitHub personal access token is required." }
-        val userJson = getJson("$API_BASE/user", token)
-        return userJson.optString("login").takeIf { it.isNotBlank() }
-            ?: throw IllegalStateException("Could not determine GitHub username from access token.")
+    fun verifyTokenAndAccount(
+        tokenInput: String,
+        usernameInput: String = "",
+        allowExternalUser: Boolean = false
+    ): GitHubAccountVerification {
+        val token = cleanToken(tokenInput)
+        require(token.isNotBlank()) { "GitHub Personal Access Token is required." }
+
+        val enteredUser = normalizeUsername(usernameInput)
+        val req = newRequestBuilder("$API_BASE/user", token).get().build()
+        var authenticatedLogin = ""
+        var scopes = emptyList<String>()
+
+        client.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            val scopeHeader = resp.header("X-OAuth-Scopes")
+
+            if (resp.code == 401) {
+                throw IllegalStateException(
+                    "GitHub authentication failed (401): Personal Access Token is invalid, revoked, or expired."
+                )
+            }
+            if (!resp.isSuccessful) {
+                // Fine-grained PATs without 'Account: Read' permission may return 403 on /user
+                if (resp.code == 403 && token.startsWith("github_pat_") && enteredUser.isNotBlank()) {
+                    return GitHubAccountVerification(
+                        login = enteredUser,
+                        targetOwner = enteredUser,
+                        isOrganization = false,
+                        scopes = emptyList()
+                    )
+                }
+                throw IllegalStateException(parseGitHubError(resp.code, body, "$API_BASE/user"))
+            }
+
+            if (scopeHeader != null) {
+                scopes = scopeHeader.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                if ("repo" !in scopes && "public_repo" !in scopes) {
+                    throw IllegalStateException(
+                        "GitHub token is missing the 'repo' scope. Enable both 'repo' and 'workflow' scopes on your token."
+                    )
+                }
+                if ("workflow" !in scopes) {
+                    throw IllegalStateException(
+                        "GitHub token is missing the 'workflow' scope! Classic PATs require both 'repo' and 'workflow' scopes to push and run builds."
+                    )
+                }
+            }
+
+            val userJson = if (body.isBlank()) JSONObject() else JSONObject(body)
+            authenticatedLogin = userJson.optString("login").trim()
+            if (authenticatedLogin.isBlank()) {
+                throw IllegalStateException("Could not determine GitHub account login from access token.")
+            }
+        }
+
+        if (enteredUser.isBlank() || enteredUser.equals(authenticatedLogin, ignoreCase = true)) {
+            return GitHubAccountVerification(
+                login = authenticatedLogin,
+                targetOwner = authenticatedLogin,
+                isOrganization = false,
+                scopes = scopes
+            )
+        }
+
+        // Entered username differs from token login: check if it is an accessible organization
+        val orgResult = runCatching { getJson("$API_BASE/orgs/$enteredUser", token) }.getOrNull()
+        if (orgResult != null) {
+            val orgLogin = orgResult.optString("login", enteredUser).ifBlank { enteredUser }
+            return GitHubAccountVerification(
+                login = authenticatedLogin,
+                targetOwner = orgLogin,
+                isOrganization = true,
+                scopes = scopes
+            )
+        }
+
+        if (allowExternalUser) {
+            return GitHubAccountVerification(
+                login = authenticatedLogin,
+                targetOwner = enteredUser,
+                isOrganization = false,
+                scopes = scopes
+            )
+        }
+
+        throw IllegalStateException(
+            "GitHub username '$enteredUser' does not match your token account '$authenticatedLogin' (and is not an accessible organization). Enter '$authenticatedLogin' or leave blank."
+        )
     }
 
-    fun verifyRepoAccess(repoInput: String, tokenInput: String): GitHubRepoVerification {
-        val token = tokenInput.trim()
-        require(token.isNotBlank()) { "GitHub personal access token is required." }
-        val (owner, repo) = normalizeRepoSlug(repoInput)
-        val json = getJson("$API_BASE/repos/$owner/$repo", token)
+    fun verifyRepoAccess(
+        repoInput: String,
+        tokenInput: String,
+        defaultOwner: String = "",
+        accountLogin: String = ""
+    ): GitHubRepoVerification {
+        val token = cleanToken(tokenInput)
+        require(token.isNotBlank()) { "GitHub Personal Access Token is required." }
+        val (owner, repo) = normalizeRepoSlug(repoInput, defaultOwner = defaultOwner)
+        val url = "$API_BASE/repos/$owner/$repo"
+        val json = try {
+            getJson(url, token)
+        } catch (e: IllegalStateException) {
+            if (e.message?.contains("404") == true) {
+                throw IllegalStateException(
+                    "Repository '$owner/$repo' was not found (404). Verify the owner/repo name, enable 'Auto-create new repo', or make sure your token has access if it is private."
+                )
+            }
+            throw e
+        }
         val permissions = json.optJSONObject("permissions")
         if (permissions != null && !permissions.optBoolean("push", false)) {
             throw IllegalStateException("Token does not have push/write permission on $owner/$repo.")
         }
+        val actualOwner = json.optJSONObject("owner")?.optString("login")?.ifBlank { owner } ?: owner
+        val actualRepo = json.optString("name", repo).ifBlank { repo }
         return GitHubRepoVerification(
-            owner = owner,
-            repo = repo,
+            owner = actualOwner,
+            repo = actualRepo,
             defaultBranch = json.optString("default_branch", "main").ifBlank { "main" },
-            isPrivate = json.optBoolean("private", false)
+            isPrivate = json.optBoolean("private", false),
+            accountLogin = accountLogin.ifBlank { actualOwner },
+            autoCreateMode = false
+        )
+    }
+
+    fun verifyConfiguration(
+        usernameInput: String,
+        repoInput: String,
+        tokenInput: String,
+        autoCreateRepo: Boolean,
+        isPrivateRepo: Boolean
+    ): GitHubRepoVerification {
+        val account = verifyTokenAndAccount(
+            tokenInput = tokenInput,
+            usernameInput = usernameInput,
+            allowExternalUser = !autoCreateRepo
+        )
+        if (autoCreateRepo) {
+            val previewName = if (repoInput.isNotBlank()) {
+                val rawName = repoInput.trim()
+                    .removeSuffix("/")
+                    .removeSuffix(".git")
+                    .substringAfterLast("/")
+                sanitizeRepoName(rawName)
+            } else {
+                "auto-per-project"
+            }
+            return GitHubRepoVerification(
+                owner = account.targetOwner,
+                repo = previewName,
+                defaultBranch = "main",
+                isPrivate = isPrivateRepo,
+                accountLogin = account.login,
+                autoCreateMode = true
+            )
+        }
+        if (repoInput.isBlank()) {
+            throw IllegalArgumentException(
+                "Enter a repository (e.g. '${account.targetOwner}/my-app' or 'my-app') or enable 'Auto-create new repo'."
+            )
+        }
+        return verifyRepoAccess(
+            repoInput = repoInput,
+            tokenInput = tokenInput,
+            defaultOwner = account.targetOwner,
+            accountLogin = account.login
         )
     }
 
     fun createNewRepository(
         tokenInput: String,
+        usernameInput: String,
         projectName: String,
         customRepoInput: String,
         isPrivate: Boolean
     ): GitHubRepoVerification {
-        val token = tokenInput.trim()
-        val owner = verifyTokenAndGetUsername(token)
+        val token = cleanToken(tokenInput)
+        val account = verifyTokenAndAccount(
+            tokenInput = token,
+            usernameInput = usernameInput,
+            allowExternalUser = false
+        )
+        val owner = account.targetOwner
 
         val baseSlug = if (customRepoInput.isNotBlank()) {
             val rawName = customRepoInput.trim()
@@ -160,40 +347,61 @@ class GitHubActionsClient(private val context: Context) {
             put("auto_init", true)
             put("description", "Uploaded and compiled with Wibes Compiler AI")
         }
-        val created = postJson("$API_BASE/user/repos", token, payload)
+        val createUrl = if (account.isOrganization) {
+            "$API_BASE/orgs/$owner/repos"
+        } else {
+            "$API_BASE/user/repos"
+        }
+        val created = postJson(createUrl, token, payload)
+        val actualOwner = created.optJSONObject("owner")?.optString("login")?.ifBlank { owner } ?: owner
+        val actualRepo = created.optString("name", finalName).ifBlank { finalName }
         val defaultBranch = created.optString("default_branch", "main").ifBlank { "main" }
 
         // Wait until GitHub finishes initializing default branch commit
         var ready = false
-        for (attempt in 0 until 6) {
-            if (runCatching { getJson("$API_BASE/repos/$owner/$finalName/git/ref/heads/$defaultBranch", token) }.isSuccess) {
+        for (attempt in 0 until 10) {
+            if (runCatching {
+                    getJson("$API_BASE/repos/$actualOwner/$actualRepo/git/ref/heads/$defaultBranch", token)
+                }.isSuccess
+            ) {
                 ready = true
                 break
             }
-            Thread.sleep(700L)
+            Thread.sleep(800L)
         }
         if (!ready) {
-            throw IllegalStateException("Created $owner/$finalName, but initial branch '$defaultBranch' is still initializing. Please retry.")
+            throw IllegalStateException(
+                "Created $actualOwner/$actualRepo, but initial branch '$defaultBranch' is still initializing. Please retry."
+            )
         }
 
         return GitHubRepoVerification(
-            owner = owner,
-            repo = finalName,
+            owner = actualOwner,
+            repo = actualRepo,
             defaultBranch = defaultBranch,
-            isPrivate = isPrivate
+            isPrivate = isPrivate,
+            accountLogin = account.login,
+            autoCreateMode = true
         )
     }
 
     fun pushWorkspaceToNewRepo(
         tokenInput: String,
+        usernameInput: String,
         projectName: String,
         customRepoInput: String,
         isPrivate: Boolean,
         workspaceDir: File,
         archiveFile: File
     ): GitHubPushResult {
-        val token = tokenInput.trim()
-        val created = createNewRepository(token, projectName, customRepoInput, isPrivate)
+        val token = cleanToken(tokenInput)
+        val created = createNewRepository(
+            tokenInput = token,
+            usernameInput = usernameInput,
+            projectName = projectName,
+            customRepoInput = customRepoInput,
+            isPrivate = isPrivate
+        )
         return pushWorkspaceAndWorkflowToBranch(
             owner = created.owner,
             repo = created.repo,
@@ -206,6 +414,7 @@ class GitHubActionsClient(private val context: Context) {
 
     fun submitBuild(
         repoInput: String,
+        usernameInput: String,
         tokenInput: String,
         autoCreateRepo: Boolean,
         isPrivateRepo: Boolean,
@@ -216,8 +425,14 @@ class GitHubActionsClient(private val context: Context) {
         language: SupportedLanguage,
         config: BuildConfiguration
     ): GitHubBuildSubmission {
-        val token = tokenInput.trim()
-        require(token.isNotBlank()) { "GitHub personal access token is required." }
+        val token = cleanToken(tokenInput)
+        require(token.isNotBlank()) { "GitHub Personal Access Token is required." }
+
+        val account = verifyTokenAndAccount(
+            tokenInput = token,
+            usernameInput = usernameInput,
+            allowExternalUser = !autoCreateRepo
+        )
 
         val owner: String
         val repo: String
@@ -229,6 +444,7 @@ class GitHubActionsClient(private val context: Context) {
         if (autoCreateRepo || repoInput.isBlank()) {
             val pushed = pushWorkspaceToNewRepo(
                 tokenInput = token,
+                usernameInput = account.targetOwner,
                 projectName = projectName,
                 customRepoInput = repoInput,
                 isPrivate = isPrivateRepo,
@@ -242,7 +458,12 @@ class GitHubActionsClient(private val context: Context) {
             sourcePath = if (pushed.usedDirectFiles) "." else "wibes-archive/source.zip"
             pushedCount = pushed.pushedFileCount
         } else {
-            val info = verifyRepoAccess(repoInput, token)
+            val info = verifyRepoAccess(
+                repoInput = repoInput,
+                tokenInput = token,
+                defaultOwner = account.targetOwner,
+                accountLogin = account.login
+            )
             owner = info.owner
             repo = info.repo
             dispatchBranch = info.defaultBranch
@@ -261,7 +482,6 @@ class GitHubActionsClient(private val context: Context) {
             )
         }
 
-        // Dispatch workflow_dispatch on default branch
         val inputs = JSONObject().apply {
             put("job_id", jobId)
             put("source_branch", sourceBranch)
@@ -276,27 +496,91 @@ class GitHubActionsClient(private val context: Context) {
             put("min_sdk", config.minSdk.toString())
             put("target_sdk", config.targetSdk.toString())
         }
-        val dispatchPayload = JSONObject().apply {
-            put("ref", dispatchBranch)
-            put("inputs", inputs)
-        }
-        postJson(
-            "$API_BASE/repos/$owner/$repo/actions/workflows/$WORKFLOW_FILENAME/dispatches",
-            token,
-            dispatchPayload
-        )
 
-        val runId = runCatching {
-            Thread.sleep(1800L)
-            findRunIdForJob(owner, repo, token, jobId)
-        }.getOrNull()
+        waitForWorkflowAndDispatch(owner, repo, dispatchBranch, token, inputs)
+
+        var runId: Long? = null
+        for (attempt in 0 until 3) {
+            Thread.sleep(1500L)
+            runId = runCatching { findRunIdForJob(owner, repo, token, jobId) }.getOrNull()
+            if (runId != null) break
+        }
 
         return GitHubBuildSubmission(
             slug = "$owner/$repo",
+            accountLogin = account.login,
             repoHtmlUrl = "https://github.com/$owner/$repo",
             runId = runId,
             pushedFileCount = pushedCount
         )
+    }
+
+    private fun waitForWorkflowAndDispatch(
+        owner: String,
+        repo: String,
+        branch: String,
+        token: String,
+        inputs: JSONObject
+    ) {
+        // GitHub Actions takes a few seconds to index a newly committed workflow YAML.
+        var workflowIdOrFilename: String = WORKFLOW_FILENAME
+        for (attempt in 0 until 10) {
+            val workflowsResp = runCatching {
+                getJson("$API_BASE/repos/$owner/$repo/actions/workflows", token)
+            }.getOrNull()
+            val arr = workflowsResp?.optJSONArray("workflows")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val wf = arr.optJSONObject(i) ?: continue
+                    val path = wf.optString("path", "")
+                    val state = wf.optString("state", "")
+                    if (path == WORKFLOW_PATH || path.endsWith("/$WORKFLOW_FILENAME")) {
+                        if (state == "disabled_manually" || state == "disabled_inactivity") {
+                            throw IllegalStateException(
+                                "GitHub Actions workflow is disabled on $owner/$repo ($state). Enable Actions in the repo settings."
+                            )
+                        }
+                        val numericId = wf.optLong("id", 0L)
+                        if (numericId > 0L) {
+                            workflowIdOrFilename = numericId.toString()
+                        }
+                        break
+                    }
+                }
+                if (workflowIdOrFilename != WORKFLOW_FILENAME) break
+            }
+            Thread.sleep(1500L)
+        }
+
+        val dispatchPayload = JSONObject().apply {
+            put("ref", branch)
+            put("inputs", inputs)
+        }
+
+        var lastError: Throwable? = null
+        for (attempt in 0 until 8) {
+            val url = "$API_BASE/repos/$owner/$repo/actions/workflows/$workflowIdOrFilename/dispatches"
+            val req = newRequestBuilder(url, token)
+                .post(dispatchPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (resp.isSuccessful) {
+                    return
+                }
+                val retryable = resp.code == 404 ||
+                    (resp.code == 422 && body.contains("workflow_dispatch", ignoreCase = true))
+                if (!retryable) {
+                    throw IllegalStateException(parseGitHubError(resp.code, body, url))
+                }
+                lastError = IllegalStateException(parseGitHubError(resp.code, body, url))
+            }
+            Thread.sleep(2000L)
+        }
+
+        throw (lastError ?: IllegalStateException(
+            "GitHub Actions did not index $WORKFLOW_PATH on $owner/$repo in time. Please retry."
+        ))
     }
 
     private fun pushWorkspaceAndWorkflowToBranch(
@@ -336,7 +620,7 @@ class GitHubActionsClient(private val context: Context) {
             }
         }
 
-        // Also push the uploaded source ZIP cleanly so the archive itself is preserved in the repo
+        // Always push the uploaded source ZIP so the archive itself is preserved in the repo
         if (archiveFile.exists() && archiveFile.length() in 1L..MAX_SINGLE_BLOB_BYTES) {
             val zipBlobSha = createGitBlobStreaming(owner, repo, token, archiveFile)
             treeItems.put(
@@ -459,16 +743,14 @@ class GitHubActionsClient(private val context: Context) {
                 fos.write("\"}".toByteArray(Charsets.UTF_8))
                 fos.flush()
             }
-            val req = Request.Builder()
-                .url("$API_BASE/repos/$owner/$repo/git/blobs")
-                .header("Authorization", "Bearer $token")
-                .header("Accept", "application/vnd.github+json")
+            val url = "$API_BASE/repos/$owner/$repo/git/blobs"
+            val req = newRequestBuilder(url, token)
                 .post(tempPayload.asRequestBody("application/json; charset=utf-8".toMediaType()))
                 .build()
             client.newCall(req).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    throw IllegalStateException(parseGitHubError(resp.code, body))
+                    throw IllegalStateException(parseGitHubError(resp.code, body, url))
                 }
                 return JSONObject(body).getString("sha")
             }
@@ -477,11 +759,14 @@ class GitHubActionsClient(private val context: Context) {
         }
     }
 
-    fun findRunIdForJob(owner: String, repo: String, token: String, jobId: String): Long? {
-        val json = getJson(
-            "$API_BASE/repos/$owner/$repo/actions/workflows/$WORKFLOW_FILENAME/runs?event=workflow_dispatch&per_page=10",
-            token
-        )
+    fun findRunIdForJob(owner: String, repo: String, tokenInput: String, jobId: String): Long? {
+        val token = cleanToken(tokenInput)
+        val json = runCatching {
+            getJson(
+                "$API_BASE/repos/$owner/$repo/actions/runs?event=workflow_dispatch&per_page=15",
+                token
+            )
+        }.getOrNull() ?: return null
         val runs = json.optJSONArray("workflow_runs") ?: return null
         for (i in 0 until runs.length()) {
             val run = runs.optJSONObject(i) ?: continue
@@ -494,7 +779,8 @@ class GitHubActionsClient(private val context: Context) {
         return null
     }
 
-    fun pollRunSnapshot(owner: String, repo: String, token: String, runId: Long): GitHubRunSnapshot {
+    fun pollRunSnapshot(owner: String, repo: String, tokenInput: String, runId: Long): GitHubRunSnapshot {
+        val token = cleanToken(tokenInput)
         val run = getJson("$API_BASE/repos/$owner/$repo/actions/runs/$runId", token)
         val status = run.optString("status", "queued")
         val conclusion = run.optString("conclusion", "")
@@ -589,11 +875,12 @@ class GitHubActionsClient(private val context: Context) {
     fun downloadCompiledArtifact(
         owner: String,
         repo: String,
-        token: String,
+        tokenInput: String,
         runId: Long,
         jobId: String,
         destDir: File
     ): File {
+        val token = cleanToken(tokenInput)
         destDir.mkdirs()
         val json = getJson("$API_BASE/repos/$owner/$repo/actions/runs/$runId/artifacts", token)
         val artifacts = json.optJSONArray("artifacts")
@@ -612,11 +899,8 @@ class GitHubActionsClient(private val context: Context) {
         }
 
         val zipFile = File(destDir, "artifact_bundle.zip")
-        val req = Request.Builder()
-            .url("$API_BASE/repos/$owner/$repo/actions/artifacts/$targetArtifactId/zip")
-            .header("Authorization", "Bearer $token")
-            .header("Accept", "application/vnd.github+json")
-            .build()
+        val url = "$API_BASE/repos/$owner/$repo/actions/artifacts/$targetArtifactId/zip"
+        val req = newRequestBuilder(url, token).build()
 
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful || resp.body == null) {
@@ -648,7 +932,8 @@ class GitHubActionsClient(private val context: Context) {
             ?: throw IllegalStateException("Artifact archive contained no valid compiled output file.")
     }
 
-    fun cancelRun(owner: String, repo: String, token: String, runId: Long) {
+    fun cancelRun(owner: String, repo: String, tokenInput: String, runId: Long) {
+        val token = cleanToken(tokenInput)
         postJson(
             "$API_BASE/repos/$owner/$repo/actions/runs/$runId/cancel",
             token,
@@ -750,17 +1035,15 @@ class GitHubActionsClient(private val context: Context) {
                 fos.flush()
             }
 
-            val req = Request.Builder()
-                .url("$API_BASE/repos/$owner/$repo/contents/$repoPath")
-                .header("Authorization", "Bearer $token")
-                .header("Accept", "application/vnd.github+json")
+            val url = "$API_BASE/repos/$owner/$repo/contents/$repoPath"
+            val req = newRequestBuilder(url, token)
                 .put(tempPayload.asRequestBody("application/json; charset=utf-8".toMediaType()))
                 .build()
 
             client.newCall(req).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    throw IllegalStateException(parseGitHubError(resp.code, body))
+                    throw IllegalStateException(parseGitHubError(resp.code, body, url))
                 }
             }
         } finally {
@@ -769,11 +1052,7 @@ class GitHubActionsClient(private val context: Context) {
     }
 
     private fun fetchJobLogTail(owner: String, repo: String, token: String, jobId: Long): String {
-        val req = Request.Builder()
-            .url("$API_BASE/repos/$owner/$repo/actions/jobs/$jobId/logs")
-            .header("Authorization", "Bearer $token")
-            .header("Accept", "application/vnd.github+json")
-            .build()
+        val req = newRequestBuilder("$API_BASE/repos/$owner/$repo/actions/jobs/$jobId/logs", token).build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return ""
             val txt = resp.body?.string().orEmpty()
@@ -781,78 +1060,87 @@ class GitHubActionsClient(private val context: Context) {
         }
     }
 
-    private fun getJson(url: String, token: String): JSONObject {
-        val req = Request.Builder()
+    private fun newRequestBuilder(url: String, token: String): Request.Builder =
+        Request.Builder()
             .url(url)
             .header("Authorization", "Bearer $token")
             .header("Accept", "application/vnd.github+json")
-            .get()
-            .build()
+            .header("X-GitHub-Api-Version", API_VERSION)
+            .header("User-Agent", USER_AGENT)
+
+    private fun getJson(url: String, token: String): JSONObject {
+        val req = newRequestBuilder(url, token).get().build()
         client.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IllegalStateException(parseGitHubError(resp.code, body))
+                throw IllegalStateException(parseGitHubError(resp.code, body, url))
             }
             return if (body.isBlank()) JSONObject() else JSONObject(body)
         }
     }
 
     private fun postJson(url: String, token: String, payload: JSONObject): JSONObject {
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer $token")
-            .header("Accept", "application/vnd.github+json")
+        val req = newRequestBuilder(url, token)
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IllegalStateException(parseGitHubError(resp.code, body))
+                throw IllegalStateException(parseGitHubError(resp.code, body, url))
             }
             return if (body.isBlank()) JSONObject() else JSONObject(body)
         }
     }
 
     private fun putJson(url: String, token: String, payload: JSONObject): JSONObject {
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer $token")
-            .header("Accept", "application/vnd.github+json")
+        val req = newRequestBuilder(url, token)
             .put(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IllegalStateException(parseGitHubError(resp.code, body))
+                throw IllegalStateException(parseGitHubError(resp.code, body, url))
             }
             return if (body.isBlank()) JSONObject() else JSONObject(body)
         }
     }
 
     private fun patchJson(url: String, token: String, payload: JSONObject): JSONObject {
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer $token")
-            .header("Accept", "application/vnd.github+json")
+        val req = newRequestBuilder(url, token)
             .patch(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         client.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IllegalStateException(parseGitHubError(resp.code, body))
+                throw IllegalStateException(parseGitHubError(resp.code, body, url))
             }
             return if (body.isBlank()) JSONObject() else JSONObject(body)
         }
     }
 
-    private fun parseGitHubError(code: Int, body: String): String {
-        val msg = runCatching { JSONObject(body).optString("message") }.getOrNull().orEmpty()
+    private fun parseGitHubError(code: Int, body: String, url: String = ""): String {
+        val parsed = runCatching { JSONObject(body) }.getOrNull()
+        val msg = parsed?.optString("message").orEmpty()
+        val extraErrors = parsed?.optJSONArray("errors")?.let { arr ->
+            (0 until arr.length()).mapNotNull { idx ->
+                arr.optJSONObject(idx)?.optString("message")?.takeIf { it.isNotBlank() }
+            }.joinToString("; ")
+        }.orEmpty()
+        val detail = listOf(msg, extraErrors).filter { it.isNotBlank() }.joinToString(" — ")
+
         return when (code) {
-            401 -> "GitHub authentication failed (401): check your Personal Access Token."
-            403 -> "GitHub permission denied (403): ensure your token has 'repo' and 'workflow' scopes. ($msg)"
-            404 -> "GitHub repository or workflow not found (404): verify repo access and token permissions. ($msg)"
-            422 -> "GitHub rejected request (422): $msg"
-            else -> "GitHub API error ($code): ${msg.ifBlank { body.take(200) }}"
+            401 -> "GitHub authentication failed (401): check your Personal Access Token. ($detail)"
+            403 -> "GitHub permission denied (403): ensure your token has 'repo' and 'workflow' scopes. ($detail)"
+            404 -> when {
+                url.contains("/actions/workflows/") ->
+                    "GitHub Actions workflow not found (404): ensure Actions is enabled on the repository and your token has the 'workflow' scope. ($detail)"
+                url.contains("/orgs/") ->
+                    "GitHub organization not found (404): verify the entered GitHub Username. ($detail)"
+                else ->
+                    "GitHub repository not found (404): check the GitHub Username / repository name, enable 'Auto-create new repo', or verify your token's 'repo' scope. ($detail)"
+            }
+            422 -> "GitHub rejected request (422): $detail"
+            else -> "GitHub API error ($code): ${detail.ifBlank { body.take(200) }}"
         }
     }
 }

@@ -26,6 +26,7 @@ enum class BuildEngineMode(val id: String, val label: String) {
 
 data class CompilerSettings(
     val buildEngineMode: BuildEngineMode = BuildEngineMode.GITHUB_ACTIONS,
+    val githubUsername: String = "",
     val githubRepo: String = "",
     val githubToken: String = "",
     val githubAutoCreateRepo: Boolean = true,
@@ -45,6 +46,7 @@ class SettingsDataStore(private val context: Context) {
 
     private object Keys {
         val BUILD_ENGINE_MODE = stringPreferencesKey("build_engine_mode")
+        val GITHUB_USERNAME = stringPreferencesKey("github_username")
         val GITHUB_REPO = stringPreferencesKey("github_repo")
         val GITHUB_TOKEN = stringPreferencesKey("github_token")
         val GITHUB_AUTO_CREATE_REPO = booleanPreferencesKey("github_auto_create_repo")
@@ -65,6 +67,7 @@ class SettingsDataStore(private val context: Context) {
         val theme = ThemeMode.entries.firstOrNull { it.name == themeStr } ?: ThemeMode.SYSTEM
         CompilerSettings(
             buildEngineMode = BuildEngineMode.fromId(prefs[Keys.BUILD_ENGINE_MODE]),
+            githubUsername = prefs[Keys.GITHUB_USERNAME] ?: "",
             githubRepo = prefs[Keys.GITHUB_REPO] ?: "",
             githubToken = prefs[Keys.GITHUB_TOKEN] ?: "",
             githubAutoCreateRepo = prefs[Keys.GITHUB_AUTO_CREATE_REPO] ?: true,
@@ -85,10 +88,22 @@ class SettingsDataStore(private val context: Context) {
         context.dataStore.edit { it[Keys.BUILD_ENGINE_MODE] = mode.id }
     }
 
-    suspend fun updateGithubConfig(repo: String, token: String) {
+    suspend fun updateGithubConfig(username: String, repo: String, token: String) {
+        val cleanUser = username.trim().removePrefix("@").trim()
         context.dataStore.edit {
+            it[Keys.GITHUB_USERNAME] = cleanUser
             it[Keys.GITHUB_REPO] = repo.trim()
             it[Keys.GITHUB_TOKEN] = token.trim()
+        }
+    }
+
+    suspend fun updateGithubUsernameIfBlank(username: String) {
+        val cleanUser = username.trim().removePrefix("@").trim()
+        if (cleanUser.isBlank()) return
+        context.dataStore.edit { prefs ->
+            if (prefs[Keys.GITHUB_USERNAME].isNullOrBlank()) {
+                prefs[Keys.GITHUB_USERNAME] = cleanUser
+            }
         }
     }
 

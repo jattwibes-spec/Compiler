@@ -75,7 +75,7 @@ fun BuildConfigScreen(
     analysis: ProjectAnalysisResult?,
     config: BuildConfiguration,
     settings: CompilerSettings,
-    onSaveGithubQuick: (String, String) -> Unit,
+    onSaveGithubQuick: (String, String, String) -> Unit,
     onUpdateGithubRepoOptions: (Boolean, Boolean) -> Unit,
     onPushToNewRepo: () -> Unit,
     onUpdateDownloadFolder: (String, String) -> Unit,
@@ -99,8 +99,30 @@ fun BuildConfigScreen(
 
     val context = LocalContext.current
     var unsupportedNotice by remember { mutableStateOf<String?>(null) }
-    var ghRepoInput by remember(settings.githubRepo) { mutableStateOf(settings.githubRepo) }
-    var ghTokenInput by remember(settings.githubToken) { mutableStateOf(settings.githubToken) }
+    var ghUsernameInput by remember { mutableStateOf(settings.githubUsername) }
+    var lastEmittedGhUser by remember { mutableStateOf(settings.githubUsername) }
+    if (settings.githubUsername != lastEmittedGhUser) {
+        lastEmittedGhUser = settings.githubUsername
+        if (ghUsernameInput != settings.githubUsername) {
+            ghUsernameInput = settings.githubUsername
+        }
+    }
+    var ghRepoInput by remember { mutableStateOf(settings.githubRepo) }
+    var lastEmittedGhRepo by remember { mutableStateOf(settings.githubRepo) }
+    if (settings.githubRepo != lastEmittedGhRepo) {
+        lastEmittedGhRepo = settings.githubRepo
+        if (ghRepoInput != settings.githubRepo) {
+            ghRepoInput = settings.githubRepo
+        }
+    }
+    var ghTokenInput by remember { mutableStateOf(settings.githubToken) }
+    var lastEmittedGhToken by remember { mutableStateOf(settings.githubToken) }
+    if (settings.githubToken != lastEmittedGhToken) {
+        lastEmittedGhToken = settings.githubToken
+        if (ghTokenInput != settings.githubToken) {
+            ghTokenInput = settings.githubToken
+        }
+    }
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { treeUri ->
@@ -321,19 +343,33 @@ fun BuildConfigScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         OutlinedTextField(
+                            value = ghUsernameInput,
+                            onValueChange = {
+                                ghUsernameInput = it
+                                lastEmittedGhUser = it.trim().removePrefix("@").trim()
+                                onSaveGithubQuick(it, ghRepoInput, ghTokenInput)
+                            },
+                            label = { Text("GitHub Username or Org") },
+                            placeholder = { Text("e.g. octocat (auto-detected if blank)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("build_github_username_input")
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
                             value = ghRepoInput,
                             onValueChange = {
                                 ghRepoInput = it
-                                onSaveGithubQuick(it, ghTokenInput)
+                                lastEmittedGhRepo = it.trim()
+                                onSaveGithubQuick(ghUsernameInput, it, ghTokenInput)
                             },
                             label = {
                                 Text(
                                     if (settings.githubAutoCreateRepo) "New Repo Name (optional, defaults to project name)"
-                                    else "GitHub Repository (owner/repo or URL)"
+                                    else "GitHub Repository (repo, owner/repo, or URL)"
                                 )
                             },
                             placeholder = {
-                                Text(if (settings.githubAutoCreateRepo) "leave blank for auto name" else "https://github.com/user/repo")
+                                Text(if (settings.githubAutoCreateRepo) "leave blank for auto name" else "my-repo or user/my-repo")
                             },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
@@ -343,9 +379,10 @@ fun BuildConfigScreen(
                             value = ghTokenInput,
                             onValueChange = {
                                 ghTokenInput = it
-                                onSaveGithubQuick(ghRepoInput, it)
+                                lastEmittedGhToken = it.trim()
+                                onSaveGithubQuick(ghUsernameInput, ghRepoInput, it)
                             },
-                            label = { Text("GitHub Access Token") },
+                            label = { Text("GitHub Access Token (repo + workflow)") },
                             visualTransformation = PasswordVisualTransformation(),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()

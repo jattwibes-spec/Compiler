@@ -101,27 +101,29 @@ class CompilerRepository(
     }
 
     suspend fun updateBuildEngineMode(mode: BuildEngineMode) = settingsStore.updateBuildEngineMode(mode)
-    suspend fun updateGithubConfig(repo: String, token: String) = settingsStore.updateGithubConfig(repo, token)
+    suspend fun updateGithubConfig(username: String, repo: String, token: String) =
+        settingsStore.updateGithubConfig(username, repo, token)
     suspend fun updateGithubRepoOptions(autoCreate: Boolean, isPrivate: Boolean) =
         settingsStore.updateGithubRepoOptions(autoCreate, isPrivate)
 
-    suspend fun verifyGithubConfig(repo: String, token: String): Result<GitHubRepoVerification> = withContext(Dispatchers.IO) {
+    suspend fun verifyGithubConfig(
+        username: String,
+        repo: String,
+        token: String
+    ): Result<GitHubRepoVerification> = withContext(Dispatchers.IO) {
         runCatching {
             val settings = settingsStore.settingsFlow.first()
-            if (repo.isBlank() || (settings.githubAutoCreateRepo && !repo.contains("/"))) {
-                val username = gitHubClient.verifyTokenAndGetUsername(token)
-                settingsStore.updateGithubConfig(repo.trim(), token.trim())
-                GitHubRepoVerification(
-                    owner = username,
-                    repo = repo.trim().ifBlank { "auto-per-project" },
-                    defaultBranch = "main",
-                    isPrivate = settings.githubPrivateRepo
-                )
-            } else {
-                val info = gitHubClient.verifyRepoAccess(repo, token)
-                settingsStore.updateGithubConfig("${info.owner}/${info.repo}", token.trim())
-                info
-            }
+            val info = gitHubClient.verifyConfiguration(
+                usernameInput = username,
+                repoInput = repo,
+                tokenInput = token,
+                autoCreateRepo = settings.githubAutoCreateRepo,
+                isPrivateRepo = settings.githubPrivateRepo
+            )
+            val savedUsername = gitHubClient.normalizeUsername(username).ifBlank { info.accountLogin }
+            val savedRepo = if (settings.githubAutoCreateRepo) repo.trim() else "${info.owner}/${info.repo}"
+            settingsStore.updateGithubConfig(savedUsername, savedRepo, gitHubClient.cleanToken(token))
+            info
         }
     }
 
@@ -130,7 +132,7 @@ class CompilerRepository(
             val entity = projectDao.getProjectById(projectId)
                 ?: throw IllegalStateException("Project workspace not found.")
             val settings = settingsStore.settingsFlow.first()
-            val token = settings.githubToken.trim()
+            val token = gitHubClient.cleanToken(settings.githubToken)
             if (token.isBlank()) {
                 throw IllegalStateException("Enter your GitHub Personal Access Token first.")
             }
@@ -139,14 +141,17 @@ class CompilerRepository(
                 ?: File(context.filesDir, "projects/$projectId/source.zip").also {
                     archiveManager.packageWorkspaceToZip(File(entity.workspacePath), it)
                 }
-            gitHubClient.pushWorkspaceToNewRepo(
+            val result = gitHubClient.pushWorkspaceToNewRepo(
                 tokenInput = token,
+                usernameInput = settings.githubUsername,
                 projectName = entity.name,
                 customRepoInput = settings.githubRepo,
                 isPrivate = settings.githubPrivateRepo,
                 workspaceDir = File(entity.workspacePath),
                 archiveFile = archiveFile
             )
+            settingsStore.updateGithubUsernameIfBlank(result.owner)
+            result
         }
     }
     suspend fun updateDownloadFolder(uriString: String, label: String) = settingsStore.updateDownloadFolder(uriString, label)
@@ -372,6 +377,7 @@ class CompilerRepository(
                 val ghBuildId = "gh_" + UUID.randomUUID().toString().replace("-", "").take(12)
                 val submission = gitHubClient.submitBuild(
                     repoInput = repoStr,
+                    usernameInput = settings.githubUsername,
                     tokenInput = ghToken,
                     autoCreateRepo = settings.githubAutoCreateRepo,
                     isPrivateRepo = settings.githubPrivateRepo,
@@ -382,6 +388,7 @@ class CompilerRepository(
                     language = language,
                     config = config
                 )
+                settingsStore.updateGithubUsernameIfBlank(submission.accountLogin)
                 val slug = submission.slug
                 val runId = submission.runId
                 val buildJob = BuildJobEntity(
@@ -476,8 +483,15 @@ class CompilerRepository(
             // Record honest failed build attempt if local failure happened before server accepted it
             val failedId = "local_err_${UUID.randomUUID().toString().take(8)}"
             val entity = projectDao.getProjectById(projectId)
+            val currentSettings = settingsStore.settingsFlow.first()
             if (entity != null && error !is IllegalStateException && error !is IllegalArgumentException) {
                 val now = System.currentTimeMillis()
+                val isGh = currentSettings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS
+                val errDetail = if (isGh) {
+                    error.localizedMessage ?: "Cannot reach GitHub API. Check internet connection."
+                } else {
+                    formatConnectionError(currentSettings.serverBaseUrl, error)
+                }
                 buildJobDao.upsertBuild(
                     BuildJobEntity(
                         buildId = failedId,
@@ -493,9 +507,13 @@ class CompilerRepository(
                         buildModeId = config.buildMode.id,
                         stageName = BuildStage.FAILED.name,
                         progressPercent = 0,
-                        dependencyStatus = "Backend unreachable or authentication required",
-                        logsText = "[ERROR] Failed to submit build to remote FastAPI backend.\n[ERROR] " + formatConnectionError(settingsStore.settingsFlow.first().serverBaseUrl, error) + "\n[HINT] Verify your FastAPI Build Backend URL and Sign-In token in the Server & History tab.",
-                        errorMessage = formatConnectionError(settingsStore.settingsFlow.first().serverBaseUrl, error),
+                        dependencyStatus = if (isGh) "GitHub Cloud connection failed" else "Backend unreachable or authentication required",
+                        logsText = if (isGh) {
+                            "[ERROR] Failed to submit build to GitHub Cloud.\n[ERROR] $errDetail\n[HINT] Check your mobile internet connection, GitHub Username, and Personal Access Token in the Server tab."
+                        } else {
+                            "[ERROR] Failed to submit build to remote FastAPI backend.\n[ERROR] $errDetail\n[HINT] Verify your FastAPI Build Backend URL and Sign-In token in the Server & History tab."
+                        },
+                        errorMessage = errDetail,
                         outputFilePath = null,
                         outputFileSizeBytes = 0L,
                         outputSha256 = null,

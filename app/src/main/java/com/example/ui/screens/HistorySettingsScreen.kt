@@ -84,7 +84,7 @@ fun HistorySettingsScreen(
     builds: List<BuildJobEntity>,
     formatBytes: (Long) -> String,
     onUpdateBuildEngineMode: (BuildEngineMode) -> Unit,
-    onSaveAndVerifyGithub: (String, String) -> Unit,
+    onSaveAndVerifyGithub: (String, String, String) -> Unit,
     onUpdateGithubRepoOptions: (Boolean, Boolean) -> Unit,
     onUpdateDownloadFolder: (String, String) -> Unit,
     onClearDownloadFolder: () -> Unit,
@@ -104,6 +104,7 @@ fun HistorySettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var githubUsernameInput by remember(settings.githubUsername) { mutableStateOf(settings.githubUsername) }
     var githubRepoInput by remember(settings.githubRepo) { mutableStateOf(settings.githubRepo) }
     var githubTokenInput by remember(settings.githubToken) { mutableStateOf(settings.githubToken) }
     var serverUrlInput by remember(settings.serverBaseUrl) { mutableStateOf(settings.serverBaseUrl) }
@@ -183,7 +184,7 @@ fun HistorySettingsScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Icon(Icons.Default.Verified, contentDescription = null, tint = StatusSuccess, modifier = Modifier.size(16.dp))
                                     Text(
-                                        text = "${githubStatus.info.defaultBranch}",
+                                        text = "@${githubStatus.info.accountLogin}",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = StatusSuccess
                                     )
@@ -196,18 +197,31 @@ fun HistorySettingsScreen(
                                 Text("Check Config", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
                             }
                             GithubStatusState.Idle -> {
-                                if (settings.githubRepo.isNotBlank() && settings.githubToken.isNotBlank()) {
-                                    Text("Saved", style = MaterialTheme.typography.labelMedium, color = StatusSuccess)
+                                if (settings.githubToken.isNotBlank() && (settings.githubAutoCreateRepo || settings.githubRepo.isNotBlank())) {
+                                    Text(
+                                        text = if (settings.githubUsername.isNotBlank()) "@${settings.githubUsername}" else "Saved",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = StatusSuccess
+                                    )
                                 }
                             }
                         }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
+                        value = githubUsernameInput,
+                        onValueChange = { githubUsernameInput = it },
+                        label = { Text("GitHub Username or Org") },
+                        placeholder = { Text("e.g. octocat (auto-detected if blank)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("github_username_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
                         value = githubRepoInput,
                         onValueChange = { githubRepoInput = it },
-                        label = { Text(if (settings.githubAutoCreateRepo) "New Repo Name (optional, auto-named if blank)" else "GitHub Repository (owner/repo or URL)") },
-                        placeholder = { Text(if (settings.githubAutoCreateRepo) "leave blank to auto-name from project" else "https://github.com/username/my-compiler") },
+                        label = { Text(if (settings.githubAutoCreateRepo) "New Repo Name (optional, auto-named if blank)" else "GitHub Repository (repo name, owner/repo, or URL)") },
+                        placeholder = { Text(if (settings.githubAutoCreateRepo) "leave blank to auto-name from project" else "my-compiler or username/my-compiler") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("github_repo_input")
                     )
@@ -216,7 +230,7 @@ fun HistorySettingsScreen(
                         value = githubTokenInput,
                         onValueChange = { githubTokenInput = it },
                         label = { Text("GitHub Personal Access Token") },
-                        supportingText = { Text("Requires repo + workflow scopes. Automatically creates a repo (if enabled), pushes your uploaded folder & ZIP, and compiles APKs.") },
+                        supportingText = { Text("Classic PATs require both 'repo' and 'workflow' scopes. Automatically creates a repo (if enabled), pushes your uploaded folder & ZIP, and compiles APKs.") },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("github_token_input")
@@ -253,7 +267,7 @@ fun HistorySettingsScreen(
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     Button(
-                        onClick = { onSaveAndVerifyGithub(githubRepoInput, githubTokenInput) },
+                        onClick = { onSaveAndVerifyGithub(githubUsernameInput, githubRepoInput, githubTokenInput) },
                         enabled = githubTokenInput.isNotBlank() && (settings.githubAutoCreateRepo || githubRepoInput.isNotBlank()) && githubStatus !is GithubStatusState.Verifying,
                         modifier = Modifier.fillMaxWidth().height(48.dp).testTag("save_verify_github_button")
                     ) {

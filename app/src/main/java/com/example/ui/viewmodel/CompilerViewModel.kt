@@ -462,13 +462,17 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun saveAndVerifyGithub(repo: String, token: String) {
+    fun saveAndVerifyGithub(username: String, repo: String, token: String) {
         viewModelScope.launch {
             _githubStatus.value = GithubStatusState.Verifying
-            repository.verifyGithubConfig(repo, token)
+            repository.verifyGithubConfig(username, repo, token)
                 .onSuccess { info ->
                     _githubStatus.value = GithubStatusState.Verified(info)
-                    _statusBanner.value = "GitHub connected: ${info.owner}/${info.repo} (branch ${info.defaultBranch})"
+                    _statusBanner.value = if (info.autoCreateMode) {
+                        "GitHub verified (@${info.accountLogin}): new repos auto-create under ${info.owner}"
+                    } else {
+                        "GitHub connected (@${info.accountLogin}): ${info.owner}/${info.repo} (${info.defaultBranch})"
+                    }
                 }
                 .onFailure { err ->
                     _githubStatus.value = GithubStatusState.Error(err.localizedMessage ?: "Verification failed.")
@@ -498,9 +502,9 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun saveGithubConfigQuick(repo: String, token: String) {
+    fun saveGithubConfigQuick(username: String, repo: String, token: String) {
         viewModelScope.launch {
-            repository.updateGithubConfig(repo, token)
+            repository.updateGithubConfig(username, repo, token)
         }
     }
 

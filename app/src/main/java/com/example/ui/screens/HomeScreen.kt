@@ -135,7 +135,9 @@ fun HomeScreen(
                         val isOnline = isGithubReady ||
                             (settings.buildEngineMode == BuildEngineMode.FASTAPI_BACKEND && backendHealth is BackendHealthState.Online)
                         val pillLabel = when {
-                            settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS && isGithubReady -> "GitHub Cloud"
+                            settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS && isGithubReady -> {
+                                if (settings.githubUsername.isNotBlank()) "GitHub @${settings.githubUsername}" else "GitHub Cloud"
+                            }
                             settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS -> "GitHub Setup"
                             isOnline -> "Engine Online"
                             else -> "Server Setup"

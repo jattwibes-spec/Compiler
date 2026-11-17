@@ -205,7 +205,7 @@ class BuildMonitorWorker(
                 // remoteProjectId format: "gh|<owner>/<repo>|<runId>"
                 val meta = existing.remoteProjectId.orEmpty().split("|")
                 val slug = meta.getOrNull(1)?.takeIf { it.contains("/") }
-                    ?: gh.normalizeRepoSlug(settings.githubRepo).let { "${it.first}/${it.second}" }
+                    ?: gh.normalizeRepoSlug(settings.githubRepo, settings.githubUsername).let { "${it.first}/${it.second}" }
                 val owner = slug.substringBefore("/")
                 val repo = slug.substringAfter("/")
                 var runId = meta.getOrNull(2)?.toLongOrNull()
