@@ -51,7 +51,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.BuildEngineMode
 import com.example.data.local.BuildJobEntity
+import com.example.data.local.CompilerSettings
 import com.example.data.local.ProjectEntity
 import com.example.domain.BuildStage
 import com.example.domain.SupportedLanguage
@@ -68,6 +70,7 @@ import java.util.Locale
 fun HomeScreen(
     projects: List<ProjectEntity>,
     builds: List<BuildJobEntity>,
+    settings: CompilerSettings,
     maxConcurrentBuilds: Int,
     backendHealth: BackendHealthState,
     formatBytes: (Long) -> String,
@@ -127,7 +130,16 @@ fun HomeScreen(
                             }
                         }
 
-                        val isOnline = backendHealth is BackendHealthState.Online
+                        val isGithubReady = settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS &&
+                            settings.githubRepo.isNotBlank() && settings.githubToken.isNotBlank()
+                        val isOnline = isGithubReady ||
+                            (settings.buildEngineMode == BuildEngineMode.FASTAPI_BACKEND && backendHealth is BackendHealthState.Online)
+                        val pillLabel = when {
+                            settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS && isGithubReady -> "GitHub Cloud"
+                            settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS -> "GitHub Setup"
+                            isOnline -> "Engine Online"
+                            else -> "Server Setup"
+                        }
                         Surface(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
@@ -144,12 +156,12 @@ fun HomeScreen(
                             ) {
                                 Icon(
                                     imageVector = if (isOnline) Icons.Default.CloudDone else Icons.Default.CloudOff,
-                                    contentDescription = "Backend server status",
+                                    contentDescription = "Build engine status",
                                     tint = if (isOnline) StatusSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = if (isOnline) "Engine Online" else "Server Setup",
+                                    text = pillLabel,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = if (isOnline) StatusSuccess else MaterialTheme.colorScheme.onSurfaceVariant
                                 )

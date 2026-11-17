@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Share
@@ -144,6 +146,19 @@ fun ResultsScreen(
                         KeyValueRow("SHA-256", it.take(24) + "...", monoValue = true)
                     }
 
+                    val autoSavedLine = buildJob.logsText.lineSequence()
+                        .firstOrNull { it.startsWith("[DOWNLOAD]") }
+                        ?.removePrefix("[DOWNLOAD]")
+                        ?.trim()
+                    if (!autoSavedLine.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = autoSavedLine,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = StatusSuccess,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                     if (exportMessage != null) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
@@ -155,7 +170,33 @@ fun ResultsScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    Button(
+                    if (artifactFile.name.endsWith(".apk", ignoreCase = true)) {
+                        Button(
+                            onClick = {
+                                val contentUri: Uri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    artifactFile
+                                )
+                                val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(contentUri, "application/vnd.android.package-archive")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                runCatching { context.startActivity(installIntent) }
+                                    .onFailure { err -> exportMessage = "Unable to launch installer: ${err.localizedMessage}" }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp)
+                                .testTag("install_apk_button")
+                        ) {
+                            Icon(Icons.Default.Android, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Install Compiled APK", fontWeight = FontWeight.SemiBold)
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+                    FilledTonalButton(
                         onClick = { saveDocumentLauncher.launch(artifactFile.name) },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -164,7 +205,7 @@ fun ResultsScreen(
                     ) {
                         Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Download / Save ${buildJob.outputFormatId}")
+                        Text("Save Copy to Another Folder")
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))

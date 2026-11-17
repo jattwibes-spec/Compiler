@@ -14,9 +14,12 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.example.R
+import com.example.data.local.ArtifactAutoSaver
+import com.example.data.local.BuildJobEntity
 import com.example.data.local.DatabaseProvider
 import com.example.data.local.SettingsDataStore
 import com.example.data.remote.DynamicBackendClient
+import com.example.data.remote.GitHubActionsClient
 import com.example.domain.BuildStage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -55,7 +58,13 @@ class BuildMonitorWorker(
         val buildId = inputData.getString(KEY_BUILD_ID) ?: return Result.failure()
         val db = DatabaseProvider.getDatabase(applicationContext)
         val buildDao = db.buildJobDao()
-        val settings = SettingsDataStore(applicationContext).settingsFlow.first()
+        val settingsStore = SettingsDataStore(applicationContext)
+
+        if (buildId.startsWith("gh_")) {
+            return monitorGitHubBuild(buildId, buildDao, settingsStore)
+        }
+
+        val settings = settingsStore.settingsFlow.first()
         val api = DynamicBackendClient().createService(settings.serverBaseUrl, settings.authToken)
 
         while (!isStopped) {
@@ -68,13 +77,14 @@ class BuildMonitorWorker(
                 val status = api.getBuildStatus(buildId)
                 val logsResponse = runCatching { api.getBuildLogs(buildId) }.getOrNull()
                 val stage = BuildStage.fromWire(status.stage)
-                val joinedLogs = logsResponse?.logs?.joinToString("\n") ?: existing.logsText
+                var joinedLogs = logsResponse?.logs?.joinToString("\n") ?: existing.logsText
 
                 var savedFilePath: String? = existing.outputFilePath
                 var savedFileSize: Long = existing.outputFileSizeBytes
                 var savedSha256: String? = existing.outputSha256
                 var finalStage = stage
                 var finalError = status.errorMessage
+                var autoSaveNote: String? = null
 
                 if (stage == BuildStage.COMPLETED) {
                     if (!status.artifactReady) {
@@ -87,7 +97,6 @@ class BuildMonitorWorker(
                         val filename = status.artifactFilename?.ifBlank { "output_${buildId.take(6)}.bin" }
                             ?: "output_${buildId.take(6)}.bin"
                         val destFile = File(artifactDir, filename)
-
                         val downloadResp = api.downloadArtifact(buildId)
                         if (downloadResp.isSuccessful && downloadResp.body() != null) {
                             downloadResp.body()!!.byteStream().use { input ->
@@ -99,6 +108,17 @@ class BuildMonitorWorker(
                                 savedFilePath = destFile.absolutePath
                                 savedFileSize = destFile.length()
                                 savedSha256 = computeSha256(destFile)
+                                val latestSettings = settingsStore.settingsFlow.first()
+                                ArtifactAutoSaver.saveToConfiguredFolder(
+                                    applicationContext,
+                                    destFile,
+                                    latestSettings.downloadFolderUri
+                                ).onSuccess { msg ->
+                                    autoSaveNote = msg
+                                    joinedLogs = "$joinedLogs\n[DOWNLOAD] $msg"
+                                }.onFailure { err ->
+                                    joinedLogs = "$joinedLogs\n[WARN] Auto-save to folder skipped: ${err.localizedMessage}"
+                                }
                             } else {
                                 finalStage = BuildStage.FAILED
                                 finalError = "Downloaded artifact file is empty or missing on device."
@@ -138,7 +158,7 @@ class BuildMonitorWorker(
                             "${existing.appName} build ${finalStage.label.lowercase()}"
                         },
                         body = if (finalStage == BuildStage.COMPLETED) {
-                            "Verified output ready (${existing.outputFormatId})"
+                            autoSaveNote ?: "Verified output ready (${existing.outputFormatId})"
                         } else {
                             finalError ?: "Open Compilation Logs for diagnostics."
                         }
@@ -147,7 +167,6 @@ class BuildMonitorWorker(
                 }
             } catch (e: Exception) {
                 if (isStopped) return Result.failure()
-                // Keep monitoring if transient network hiccup; surface message in Room
                 val current = buildDao.getBuildById(buildId)
                 if (current != null && !BuildStage.fromWire(current.stageName).isTerminal) {
                     buildDao.upsertBuild(
@@ -157,10 +176,160 @@ class BuildMonitorWorker(
                     )
                 }
             }
-
             delay(2000L)
         }
         return Result.success()
+    }
+
+    private suspend fun monitorGitHubBuild(
+        buildId: String,
+        buildDao: com.example.data.local.BuildJobDao,
+        settingsStore: SettingsDataStore
+    ): Result {
+        val gh = GitHubActionsClient(applicationContext)
+
+        while (!isStopped) {
+            val existing = buildDao.getBuildById(buildId) ?: return Result.failure()
+            if (BuildStage.fromWire(existing.stageName).isTerminal) {
+                return Result.success()
+            }
+
+            val settings = settingsStore.settingsFlow.first()
+            val token = settings.githubToken.trim()
+            if (token.isBlank()) {
+                failJob(buildDao, existing, "GitHub access token was cleared before build finished.")
+                return Result.failure()
+            }
+
+            try {
+                // remoteProjectId format: "gh|<owner>/<repo>|<runId>"
+                val meta = existing.remoteProjectId.orEmpty().split("|")
+                val slug = meta.getOrNull(1)?.takeIf { it.contains("/") }
+                    ?: gh.normalizeRepoSlug(settings.githubRepo).let { "${it.first}/${it.second}" }
+                val owner = slug.substringBefore("/")
+                val repo = slug.substringAfter("/")
+                var runId = meta.getOrNull(2)?.toLongOrNull()
+
+                if (runId == null || runId <= 0L) {
+                    runId = gh.findRunIdForJob(owner, repo, token, buildId)
+                    if (runId == null) {
+                        buildDao.upsertBuild(
+                            existing.copy(
+                                stageName = BuildStage.QUEUED.name,
+                                progressPercent = 8,
+                                dependencyStatus = "Waiting for GitHub Actions to register run...",
+                                logsText = "${existing.logsText.lineSequence().take(6).joinToString("\n")}\n[WAIT] Waiting for GitHub Actions runner assignment..."
+                            )
+                        )
+                        delay(3500L)
+                        continue
+                    } else {
+                        buildDao.upsertBuild(
+                            existing.copy(remoteProjectId = "gh|$owner/$repo|$runId")
+                        )
+                    }
+                }
+
+                val snap = gh.pollRunSnapshot(owner, repo, token, runId)
+                var finalStage = snap.stage
+                var finalLogs = snap.logsText
+                var finalError = snap.errorMessage
+                var savedFilePath: String? = existing.outputFilePath
+                var savedFileSize: Long = existing.outputFileSizeBytes
+                var savedSha256: String? = existing.outputSha256
+                var autoSaveNote: String? = null
+
+                if (snap.stage == BuildStage.COMPLETED) {
+                    val artifactDir = File(applicationContext.filesDir, "artifacts/$buildId").apply {
+                        mkdirs()
+                    }
+                    val downloaded = gh.downloadCompiledArtifact(
+                        owner = owner,
+                        repo = repo,
+                        token = token,
+                        runId = runId,
+                        jobId = buildId,
+                        destDir = artifactDir
+                    )
+                    savedFilePath = downloaded.absolutePath
+                    savedFileSize = downloaded.length()
+                    savedSha256 = computeSha256(downloaded)
+
+                    ArtifactAutoSaver.saveToConfiguredFolder(
+                        applicationContext,
+                        downloaded,
+                        settings.downloadFolderUri
+                    ).onSuccess { msg ->
+                        autoSaveNote = msg
+                        finalLogs = "$finalLogs\n[DOWNLOAD] $msg"
+                    }.onFailure { err ->
+                        finalLogs = "$finalLogs\n[WARN] Auto-save to folder skipped: ${err.localizedMessage}"
+                    }
+                }
+
+                val now = System.currentTimeMillis()
+                val updated = existing.copy(
+                    remoteProjectId = "gh|$owner/$repo|$runId",
+                    stageName = finalStage.name,
+                    progressPercent = if (finalStage == BuildStage.COMPLETED) 100 else snap.progressPercent,
+                    dependencyStatus = snap.dependencyStatus,
+                    logsText = finalLogs,
+                    errorMessage = finalError,
+                    outputFilePath = savedFilePath,
+                    outputFileSizeBytes = savedFileSize,
+                    outputSha256 = savedSha256,
+                    durationMillis = (now - existing.startedAtMillis).coerceAtLeast(0L),
+                    completedAtMillis = if (finalStage.isTerminal) now else null
+                )
+                buildDao.upsertBuild(updated)
+
+                if (finalStage.isTerminal) {
+                    postStatusNotification(
+                        title = if (finalStage == BuildStage.COMPLETED) {
+                            "${existing.appName} APK ready"
+                        } else {
+                            "${existing.appName} build ${finalStage.label.lowercase()}"
+                        },
+                        body = if (finalStage == BuildStage.COMPLETED) {
+                            autoSaveNote ?: "Compiled artifact downloaded (${existing.outputFormatId})"
+                        } else {
+                            finalError ?: "Open Compilation Logs for details."
+                        }
+                    )
+                    return Result.success()
+                }
+            } catch (e: Exception) {
+                if (isStopped) return Result.failure()
+                val current = buildDao.getBuildById(buildId)
+                if (current != null && !BuildStage.fromWire(current.stageName).isTerminal) {
+                    buildDao.upsertBuild(
+                        current.copy(
+                            logsText = "${current.logsText}\n[WARN] GitHub polling retry (${e.localizedMessage ?: "network error"})..."
+                        )
+                    )
+                }
+            }
+            delay(5000L)
+        }
+        return Result.success()
+    }
+
+    private suspend fun failJob(
+        buildDao: com.example.data.local.BuildJobDao,
+        existing: BuildJobEntity,
+        reason: String
+    ) {
+        val now = System.currentTimeMillis()
+        buildDao.upsertBuild(
+            existing.copy(
+                stageName = BuildStage.FAILED.name,
+                progressPercent = 0,
+                errorMessage = reason,
+                logsText = "${existing.logsText}\n[ERROR] $reason",
+                completedAtMillis = now,
+                durationMillis = (now - existing.startedAtMillis).coerceAtLeast(0L)
+            )
+        )
     }
 
     private fun computeSha256(file: File): String {

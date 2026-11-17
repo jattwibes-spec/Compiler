@@ -94,6 +94,7 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val aiTaskState by viewModel.aiTaskState.collectAsStateWithLifecycle()
     val chatMessages by viewModel.chatMessages.collectAsStateWithLifecycle()
+    val githubStatus by viewModel.githubStatus.collectAsStateWithLifecycle()
     val backendHealth by viewModel.backendHealth.collectAsStateWithLifecycle()
 
     val navController = rememberNavController()
@@ -207,7 +208,9 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                             HomeScreen(
                                 projects = projects,
                                 builds = builds,
+                                settings = settings,
                                 maxConcurrentBuilds = settings.maxConcurrentBuilds,
+                                githubStatus = githubStatus,
                                 backendHealth = backendHealth,
                                 formatBytes = viewModel::formatBytes,
                                 onUploadProjectClick = {
@@ -269,6 +272,9 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                                     PipelineStep.CONFIG -> BuildConfigScreen(
                                         analysis = activeAnalysis,
                                         config = buildConfig,
+                                        settings = settings,
+                                        onSaveGithubQuick = viewModel::saveGithubConfigQuick,
+                                        onUpdateDownloadFolder = viewModel::updateDownloadFolder,
                                         isStartingBuild = isStartingBuild,
                                         onUpdateConfig = viewModel::updateBuildConfig,
                                         onStartBuild = viewModel::startBuild,
@@ -319,6 +325,10 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                                 projects = projects,
                                 builds = builds,
                                 formatBytes = viewModel::formatBytes,
+                                onUpdateBuildEngineMode = viewModel::updateBuildEngineMode,
+                                onSaveAndVerifyGithub = viewModel::saveAndVerifyGithub,
+                                onUpdateDownloadFolder = viewModel::updateDownloadFolder,
+                                onClearDownloadFolder = viewModel::clearDownloadFolder,
                                 onUpdateServerUrl = viewModel::updateServerUrl,
                                 onUpdateGeminiApiKey = viewModel::updateGeminiApiKey,
                                 onCheckHealth = viewModel::checkBackendHealth,

@@ -13,7 +13,22 @@ import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "wibes_settings")
 
+enum class BuildEngineMode(val id: String, val label: String) {
+    GITHUB_ACTIONS("GITHUB_ACTIONS", "GitHub Cloud"),
+    FASTAPI_BACKEND("FASTAPI_BACKEND", "FastAPI Server");
+
+    companion object {
+        fun fromId(id: String?): BuildEngineMode =
+            entries.firstOrNull { it.id == id } ?: GITHUB_ACTIONS
+    }
+}
+
 data class CompilerSettings(
+    val buildEngineMode: BuildEngineMode = BuildEngineMode.GITHUB_ACTIONS,
+    val githubRepo: String = "",
+    val githubToken: String = "",
+    val downloadFolderUri: String = "",
+    val downloadFolderLabel: String = "",
     val serverBaseUrl: String = "http://10.0.2.2:8000",
     val authToken: String = "",
     val username: String = "",
@@ -26,6 +41,11 @@ data class CompilerSettings(
 class SettingsDataStore(private val context: Context) {
 
     private object Keys {
+        val BUILD_ENGINE_MODE = stringPreferencesKey("build_engine_mode")
+        val GITHUB_REPO = stringPreferencesKey("github_repo")
+        val GITHUB_TOKEN = stringPreferencesKey("github_token")
+        val DOWNLOAD_FOLDER_URI = stringPreferencesKey("download_folder_uri")
+        val DOWNLOAD_FOLDER_LABEL = stringPreferencesKey("download_folder_label")
         val SERVER_BASE_URL = stringPreferencesKey("server_base_url")
         val AUTH_TOKEN = stringPreferencesKey("auth_token")
         val USERNAME = stringPreferencesKey("username")
@@ -39,6 +59,11 @@ class SettingsDataStore(private val context: Context) {
         val themeStr = prefs[Keys.THEME_MODE] ?: ThemeMode.SYSTEM.name
         val theme = ThemeMode.entries.firstOrNull { it.name == themeStr } ?: ThemeMode.SYSTEM
         CompilerSettings(
+            buildEngineMode = BuildEngineMode.fromId(prefs[Keys.BUILD_ENGINE_MODE]),
+            githubRepo = prefs[Keys.GITHUB_REPO] ?: "",
+            githubToken = prefs[Keys.GITHUB_TOKEN] ?: "",
+            downloadFolderUri = prefs[Keys.DOWNLOAD_FOLDER_URI] ?: "",
+            downloadFolderLabel = prefs[Keys.DOWNLOAD_FOLDER_LABEL] ?: "",
             serverBaseUrl = prefs[Keys.SERVER_BASE_URL] ?: "http://10.0.2.2:8000",
             authToken = prefs[Keys.AUTH_TOKEN] ?: "",
             username = prefs[Keys.USERNAME] ?: "",
@@ -47,6 +72,31 @@ class SettingsDataStore(private val context: Context) {
             maxConcurrentBuilds = (prefs[Keys.MAX_CONCURRENT_BUILDS] ?: 2).coerceIn(1, 4),
             themeMode = theme
         )
+    }
+
+    suspend fun updateBuildEngineMode(mode: BuildEngineMode) {
+        context.dataStore.edit { it[Keys.BUILD_ENGINE_MODE] = mode.id }
+    }
+
+    suspend fun updateGithubConfig(repo: String, token: String) {
+        context.dataStore.edit {
+            it[Keys.GITHUB_REPO] = repo.trim()
+            it[Keys.GITHUB_TOKEN] = token.trim()
+        }
+    }
+
+    suspend fun updateDownloadFolder(uriString: String, label: String) {
+        context.dataStore.edit {
+            it[Keys.DOWNLOAD_FOLDER_URI] = uriString
+            it[Keys.DOWNLOAD_FOLDER_LABEL] = label
+        }
+    }
+
+    suspend fun clearDownloadFolder() {
+        context.dataStore.edit {
+            it[Keys.DOWNLOAD_FOLDER_URI] = ""
+            it[Keys.DOWNLOAD_FOLDER_LABEL] = ""
+        }
     }
 
     suspend fun updateServerBaseUrl(url: String) {

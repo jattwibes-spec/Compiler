@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.CompilerAiRepository
+import com.example.data.local.BuildEngineMode
 import com.example.data.local.BuildJobEntity
 import com.example.data.local.CompilerSettings
 import com.example.data.local.DatabaseProvider
@@ -16,6 +17,7 @@ import com.example.data.local.ProjectEntity
 import com.example.data.local.SafeZipArchiveManager
 import com.example.data.local.SettingsDataStore
 import com.example.data.remote.DynamicBackendClient
+import com.example.data.remote.GitHubRepoVerification
 import com.example.data.remote.HealthResponseDto
 import com.example.data.repository.CompilerRepository
 import com.example.domain.AiDiagnosisResult
@@ -30,6 +32,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -131,6 +134,9 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
     private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
 
+    private val _githubStatus = MutableStateFlow<GithubStatusState>(GithubStatusState.Idle)
+    val githubStatus: StateFlow<GithubStatusState> = _githubStatus.asStateFlow()
+
     private val _backendHealth = MutableStateFlow<BackendHealthState>(BackendHealthState.Unknown)
     val backendHealth: StateFlow<BackendHealthState> = _backendHealth.asStateFlow()
 
@@ -141,7 +147,11 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             repository.resumePendingBuildMonitors()
         }
-        checkBackendHealth()
+        viewModelScope.launch {
+            if (repository.settingsFlow.first().buildEngineMode == BuildEngineMode.FASTAPI_BACKEND) {
+                checkBackendHealth()
+            }
+        }
     }
 
     fun setPipelineStep(step: PipelineStep) {
@@ -430,6 +440,50 @@ class CompilerViewModel(application: Application) : AndroidViewModel(application
                     _chatMessages.value = errList
                 }
             }
+        }
+    }
+
+    fun updateBuildEngineMode(mode: BuildEngineMode) {
+        viewModelScope.launch {
+            repository.updateBuildEngineMode(mode)
+            if (mode == BuildEngineMode.FASTAPI_BACKEND) {
+                checkBackendHealth()
+            }
+        }
+    }
+
+    fun saveAndVerifyGithub(repo: String, token: String) {
+        viewModelScope.launch {
+            _githubStatus.value = GithubStatusState.Verifying
+            repository.verifyGithubConfig(repo, token)
+                .onSuccess { info ->
+                    _githubStatus.value = GithubStatusState.Verified(info)
+                    _statusBanner.value = "GitHub connected: ${info.owner}/${info.repo} (branch ${info.defaultBranch})"
+                }
+                .onFailure { err ->
+                    _githubStatus.value = GithubStatusState.Error(err.localizedMessage ?: "Verification failed.")
+                    _statusBanner.value = err.localizedMessage ?: "GitHub verification failed."
+                }
+        }
+    }
+
+    fun saveGithubConfigQuick(repo: String, token: String) {
+        viewModelScope.launch {
+            repository.updateGithubConfig(repo, token)
+        }
+    }
+
+    fun updateDownloadFolder(uriString: String, label: String) {
+        viewModelScope.launch {
+            repository.updateDownloadFolder(uriString, label)
+            _statusBanner.value = "Auto-download folder set to: $label"
+        }
+    }
+
+    fun clearDownloadFolder() {
+        viewModelScope.launch {
+            repository.clearDownloadFolder()
+            _statusBanner.value = "Reset auto-download folder to Downloads/WibesCompilerAI."
         }
     }
 

@@ -1,0 +1,443 @@
+# wibes-workflow-v1
+name: Wibes Cloud Compiler
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Unique Wibes build job ID
+        required: true
+        type: string
+      source_branch:
+        description: Branch holding uploaded source archive
+        required: true
+        default: wibes-builds
+        type: string
+      source_path:
+        description: Path to uploaded source.zip in source_branch
+        required: true
+        type: string
+      language:
+        description: Detected language ID
+        required: false
+        default: kotlin
+        type: string
+      output_format:
+        description: Requested output format (APK, AAB, WEB, JAR, NATIVE_BINARY)
+        required: false
+        default: APK
+        type: string
+      build_mode:
+        description: Build mode (DEBUG or RELEASE)
+        required: false
+        default: RELEASE
+        type: string
+      app_name:
+        description: Application display name
+        required: false
+        default: WibesApp
+        type: string
+      package_name:
+        description: Android applicationId
+        required: false
+        default: com.wibes.app
+        type: string
+      version_name:
+        description: Version name
+        required: false
+        default: "1.0.0"
+        type: string
+      version_code:
+        description: Version code
+        required: false
+        default: "1"
+        type: string
+      min_sdk:
+        description: Min Android SDK
+        required: false
+        default: "26"
+        type: string
+      target_sdk:
+        description: Target Android SDK
+        required: false
+        default: "35"
+        type: string
+
+run-name: "Wibes Build ${{ inputs.job_id }} (${{ inputs.app_name }})"
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout build workspace
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_branch }}
+
+      - name: Unpack and detect project toolchain
+        id: detect
+        shell: bash
+        run: |
+          mkdir -p build_src wibes_out
+          unzip -q "${{ inputs.source_path }}" -d build_src
+          # Unwrap single top-level folder if the ZIP wrapped everything in one directory
+          shopt -s dotglob
+          ENTRIES=(build_src/*)
+          if [ ${#ENTRIES[@]} -eq 1 ] && [ -d "${ENTRIES[0]}" ]; then
+            INNER="${ENTRIES[0]}"
+            mv "$INNER"/* build_src/ 2>/dev/null || true
+            rmdir "$INNER" 2>/dev/null || true
+          fi
+          shopt -u dotglob
+
+          KIND="web_apk"
+          if [ -f build_src/pubspec.yaml ]; then
+            KIND="flutter"
+          elif [ -f build_src/build.gradle ] || [ -f build_src/build.gradle.kts ] || [ -f build_src/app/build.gradle ] || [ -f build_src/app/build.gradle.kts ]; then
+            KIND="gradle"
+          elif [ -f build_src/buildozer.spec ] || ( [ "${{ inputs.language }}" = "python" ] && [ "${{ inputs.output_format }}" = "APK" ] ); then
+            KIND="python_apk"
+          elif [ "${{ inputs.output_format }}" = "WEB" ]; then
+            KIND="web_zip"
+          elif [ -f build_src/CMakeLists.txt ] || [ "${{ inputs.language }}" = "c" ] || [ "${{ inputs.language }}" = "cpp" ]; then
+            KIND="cpp"
+          elif [ -f build_src/package.json ] || [ -f build_src/index.html ] || [ "${{ inputs.output_format }}" = "APK" ]; then
+            KIND="web_apk"
+          fi
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+          echo "Detected build pipeline: $KIND"
+          ls -la build_src
+
+      - name: Set up JDK 21
+        if: steps.detect.outputs.kind == 'gradle' || steps.detect.outputs.kind == 'web_apk'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Flutter SDK
+        if: steps.detect.outputs.kind == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Set up Node.js
+        if: (steps.detect.outputs.kind == 'web_apk' || steps.detect.outputs.kind == 'web_zip')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        if: steps.detect.outputs.kind == 'python_apk'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Determine Gradle version
+        id: gradle_ver
+        if: steps.detect.outputs.kind == 'gradle' || steps.detect.outputs.kind == 'web_apk'
+        shell: bash
+        run: |
+          VER="8.13"
+          if [ -f build_src/gradle/wrapper/gradle-wrapper.properties ]; then
+            FOUND=$(grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?' build_src/gradle/wrapper/gradle-wrapper.properties | head -n1 | sed 's/gradle-//' || true)
+            if [ -n "$FOUND" ]; then
+              VER="$FOUND"
+            fi
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Using Gradle version: $VER"
+
+      - name: Set up Gradle
+        if: steps.detect.outputs.kind == 'gradle' || steps.detect.outputs.kind == 'web_apk'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle_ver.outputs.version }}
+
+      - name: Build Android Gradle Project
+        if: steps.detect.outputs.kind == 'gradle'
+        shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD != '' && secrets.STORE_PASSWORD || 'wibescompiler2026' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD != '' && secrets.KEY_PASSWORD || 'wibescompiler2026' }}
+        run: |
+          cd build_src
+          SDKMANAGER=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "platforms;android-36" "platforms;android-36.1" "build-tools;35.0.0" "build-tools;36.0.0" || true
+
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ ! -f my-upload-key.jks ]; then
+            keytool -genkeypair -v -keystore my-upload-key.jks -storepass "$STORE_PASSWORD" -alias upload -keypass "$KEY_PASSWORD" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Wibes App,O=Wibes,C=US"
+          fi
+          export KEYSTORE_PATH="$PWD/my-upload-key.jks"
+
+          if [ "${{ inputs.output_format }}" = "AAB" ]; then
+            TASK="bundleRelease"
+          elif [ "${{ inputs.build_mode }}" = "DEBUG" ]; then
+            TASK="assembleDebug"
+          else
+            TASK="assembleRelease"
+          fi
+
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew "$TASK" --no-daemon --stacktrace
+          else
+            gradle "$TASK" --no-daemon --stacktrace
+          fi
+
+          find . -type f \( -name "*.apk" -o -name "*.aab" \) -exec cp {} ../wibes_out/ \;
+          ls -lh ../wibes_out/
+
+      - name: Build Flutter Project
+        if: steps.detect.outputs.kind == 'flutter'
+        shell: bash
+        run: |
+          cd build_src
+          flutter pub get
+          if [ "${{ inputs.output_format }}" = "AAB" ]; then
+            flutter build appbundle --release
+            find build/app/outputs -name "*.aab" -exec cp {} ../wibes_out/ \;
+          elif [ "${{ inputs.output_format }}" = "WEB" ]; then
+            flutter build web --release
+            (cd build/web && zip -qr ../../../wibes_out/web_bundle.zip .)
+          elif [ "${{ inputs.build_mode }}" = "DEBUG" ]; then
+            flutter build apk --debug
+            find build/app/outputs -name "*.apk" -exec cp {} ../wibes_out/ \;
+          else
+            flutter build apk --release
+            find build/app/outputs -name "*.apk" -exec cp {} ../wibes_out/ \;
+          fi
+          ls -lh ../wibes_out/
+
+      - name: Build Web / JS Project into Signed Android APK
+        if: steps.detect.outputs.kind == 'web_apk'
+        shell: bash
+        run: |
+          cd build_src
+          WEB_DIR="."
+          if [ -f package.json ]; then
+            npm install --legacy-peer-deps || npm install
+            if npm run | grep -q "build"; then
+              npm run build
+            fi
+            if [ -d dist ]; then WEB_DIR="dist";
+            elif [ -d build ]; then WEB_DIR="build";
+            elif [ -d out ]; then WEB_DIR="out";
+            fi
+          fi
+
+          PKG="${{ inputs.package_name }}"
+          APP_TITLE="${{ inputs.app_name }}"
+          VER_NAME="${{ inputs.version_name }}"
+          VER_CODE="${{ inputs.version_code }}"
+          MIN_SDK="${{ inputs.min_sdk }}"
+          TARGET_SDK="${{ inputs.target_sdk }}"
+
+          mkdir -p /tmp/web_apk_shell/app/src/main/assets/www
+          mkdir -p /tmp/web_apk_shell/app/src/main/java/com/wibes/shell
+          cp -r "$WEB_DIR"/. /tmp/web_apk_shell/app/src/main/assets/www/
+
+          cat <<'GRADLE_ROOT' > /tmp/web_apk_shell/build.gradle
+          plugins {
+            id 'com.android.application' version '8.9.1' apply false
+          }
+          GRADLE_ROOT
+
+          echo "rootProject.name = 'WibesWebShell'" > /tmp/web_apk_shell/settings.gradle
+          echo "include ':app'" >> /tmp/web_apk_shell/settings.gradle
+          echo "org.gradle.jvmargs=-Xmx2g" > /tmp/web_apk_shell/gradle.properties
+          echo "android.useAndroidX=true" >> /tmp/web_apk_shell/gradle.properties
+
+          cat <<GRADLE_APP > /tmp/web_apk_shell/app/build.gradle
+          plugins {
+            id 'com.android.application'
+          }
+          android {
+            namespace 'com.wibes.shell'
+            compileSdk 35
+            defaultConfig {
+              applicationId "$PKG"
+              minSdk $MIN_SDK
+              targetSdk $TARGET_SDK
+              versionCode $VER_CODE
+              versionName "$VER_NAME"
+            }
+            signingConfigs {
+              release {
+                storeFile file("${'$'}rootDir/release.jks")
+                storePassword "wibescompiler"
+                keyAlias "wibes"
+                keyPassword "wibescompiler"
+              }
+            }
+            buildTypes {
+              release {
+                minifyEnabled false
+                signingConfig signingConfigs.release
+              }
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          dependencies {
+            implementation 'androidx.webkit:webkit:1.12.1'
+          }
+          GRADLE_APP
+
+          cat <<MANIFEST > /tmp/web_apk_shell/app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <application
+              android:label="$APP_TITLE"
+              android:usesCleartextTraffic="true"
+              android:theme="@android:style/Theme.Material.Light.NoActionBar">
+              <activity
+                android:name=".MainActivity"
+                android:exported="true"
+                android:configChanges="orientation|screenSize|keyboardHidden">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN" />
+                  <category android:name="android.intent.category.LAUNCHER" />
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          MANIFEST
+
+          cat <<'JAVA_ACT' > /tmp/web_apk_shell/app/src/main/java/com/wibes/shell/MainActivity.java
+          package com.wibes.shell;
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.webkit.WebViewAssetLoader;
+
+          public class MainActivity extends Activity {
+            private WebView webView;
+
+            @SuppressLint("SetJavaScriptEnabled")
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+              super.onCreate(savedInstanceState);
+              webView = new WebView(this);
+              setContentView(webView);
+              WebSettings s = webView.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setDatabaseEnabled(true);
+              s.setAllowFileAccess(true);
+              final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
+                  .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                  .build();
+              webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                  return assetLoader.shouldInterceptRequest(request.getUrl());
+                }
+              });
+              webView.loadUrl("https://appassets.androidplatform.net/assets/www/index.html");
+            }
+
+            @Override
+            public void onBackPressed() {
+              if (webView != null && webView.canGoBack()) webView.goBack();
+              else super.onBackPressed();
+            }
+          }
+          JAVA_ACT
+
+          keytool -genkeypair -v -keystore /tmp/web_apk_shell/release.jks -storepass wibescompiler -alias wibes -keypass wibescompiler -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=$APP_TITLE,O=Wibes,C=US"
+          (cd /tmp/web_apk_shell && gradle assembleRelease --no-daemon --stacktrace)
+          SAFE_NAME=$(echo "$APP_TITLE" | tr -cd '[:alnum:]_-')
+          cp /tmp/web_apk_shell/app/build/outputs/apk/release/*.apk "../wibes_out/${SAFE_NAME:-app}-release.apk"
+          ls -lh ../wibes_out/
+
+      - name: Package Web Bundle
+        if: steps.detect.outputs.kind == 'web_zip'
+        shell: bash
+        run: |
+          cd build_src
+          OUT_DIR="."
+          if [ -f package.json ]; then
+            npm install --legacy-peer-deps || npm install
+            if npm run | grep -q "build"; then
+              npm run build
+            fi
+            if [ -d dist ]; then OUT_DIR="dist";
+            elif [ -d build ]; then OUT_DIR="build";
+            elif [ -d out ]; then OUT_DIR="out";
+            fi
+          fi
+          (cd "$OUT_DIR" && zip -qr "../../wibes_out/web_bundle.zip" .)
+
+      - name: Build Python Kivy APK with Buildozer
+        if: steps.detect.outputs.kind == 'python_apk'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+          pip install --upgrade buildozer cython==0.29.36
+          cd build_src
+          if [ ! -f buildozer.spec ]; then
+            SAFE_PKG=$(echo "${{ inputs.app_name }}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+            cat <<SPEC > buildozer.spec
+          [app]
+          title = ${{ inputs.app_name }}
+          package.name = ${SAFE_PKG:-wibesapp}
+          package.domain = org.wibes
+          source.dir = .
+          source.include_exts = py,png,jpg,kv,atlas,json
+          version = ${{ inputs.version_name }}
+          requirements = python3,kivy
+          orientation = portrait
+          android.archs = arm64-v8a
+          android.accept_sdk_license = True
+          [buildozer]
+          log_level = 2
+          SPEC
+          fi
+          yes | buildozer -v android debug
+          find bin -name "*.apk" -exec cp {} ../wibes_out/ \;
+
+      - name: Build C/C++ Binary
+        if: steps.detect.outputs.kind == 'cpp'
+        shell: bash
+        run: |
+          cd build_src
+          if [ -f CMakeLists.txt ]; then
+            cmake -B build && cmake --build build
+            find build -maxdepth 3 -type f -executable -exec cp {} ../wibes_out/ \;
+          else
+            g++ -O2 *.cpp -o ../wibes_out/app.out 2>/dev/null || gcc -O2 *.c -o ../wibes_out/app.out
+          fi
+
+      - name: Verify compiled outputs exist
+        shell: bash
+        run: |
+          ls -la wibes_out/
+          if [ -z "$(ls -A wibes_out/)" ]; then
+            echo "ERROR: No compiled output file produced in wibes_out/"
+            exit 1
+          fi
+
+      - name: Upload Compiled Output Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wibes-output-${{ inputs.job_id }}
+          path: wibes_out/*
+          retention-days: 7

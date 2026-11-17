@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -47,13 +51,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.data.local.BuildEngineMode
+import com.example.data.local.CompilerSettings
 import com.example.domain.BuildConfiguration
 import com.example.domain.BuildMode
 import com.example.domain.OutputFormat
@@ -65,6 +73,9 @@ import com.example.ui.components.SectionCard
 fun BuildConfigScreen(
     analysis: ProjectAnalysisResult?,
     config: BuildConfiguration,
+    settings: CompilerSettings,
+    onSaveGithubQuick: (String, String) -> Unit,
+    onUpdateDownloadFolder: (String, String) -> Unit,
     isStartingBuild: Boolean,
     onUpdateConfig: ((BuildConfiguration) -> BuildConfiguration) -> Unit,
     onStartBuild: () -> Unit,
@@ -82,7 +93,25 @@ fun BuildConfigScreen(
         return
     }
 
+    val context = LocalContext.current
     var unsupportedNotice by remember { mutableStateOf<String?>(null) }
+    var ghRepoInput by remember(settings.githubRepo) { mutableStateOf(settings.githubRepo) }
+    var ghTokenInput by remember(settings.githubToken) { mutableStateOf(settings.githubToken) }
+    val folderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            val doc = DocumentFile.fromTreeUri(context, treeUri)
+            val label = doc?.name ?: treeUri.lastPathSegment ?: "Selected folder"
+            onUpdateDownloadFolder(treeUri.toString(), label)
+        }
+    }
 
     val iconPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -244,6 +273,83 @@ fun BuildConfigScreen(
 
             item {
                 SectionCard {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.CloudDone, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text(
+                            text = if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
+                                "GitHub Cloud & Auto-Download"
+                            } else {
+                                "Build Server & Auto-Download"
+                            },
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
+                        OutlinedTextField(
+                            value = ghRepoInput,
+                            onValueChange = {
+                                ghRepoInput = it
+                                onSaveGithubQuick(it, ghTokenInput)
+                            },
+                            label = { Text("GitHub Repository (owner/repo or URL)") },
+                            placeholder = { Text("https://github.com/user/repo") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = ghTokenInput,
+                            onValueChange = {
+                                ghTokenInput = it
+                                onSaveGithubQuick(ghRepoInput, it)
+                            },
+                            label = { Text("GitHub Access Token") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                    } else {
+                        Text(
+                            text = "FastAPI Server: ${settings.serverBaseUrl}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Auto-Download Folder", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                text = if (settings.downloadFolderUri.isNotBlank()) {
+                                    settings.downloadFolderLabel.ifBlank { "Custom folder selected" }
+                                } else {
+                                    "Downloads/WibesCompilerAI"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        OutlinedButton(onClick = { folderPicker.launch(null) }) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Change")
+                        }
+                    }
+                }
+            }
+
+            item {
+                SectionCard {
                     Text(
                         text = "SDK & Output Target",
                         style = MaterialTheme.typography.titleMedium
@@ -366,7 +472,7 @@ fun BuildConfigScreen(
                         Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isStartingBuild) "Uploading & Enqueuing Build..." else "Start Isolated Compilation",
+                            text = if (isStartingBuild) "Uploading & Starting Build..." else if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) "Compile via GitHub Cloud" else "Start Isolated Compilation",
                             fontWeight = FontWeight.SemiBold
                         )
                     }

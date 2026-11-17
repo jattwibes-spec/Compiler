@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,7 +28,9 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
@@ -47,10 +52,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.documentfile.provider.DocumentFile
+import com.example.data.local.BuildEngineMode
 import com.example.data.local.BuildJobEntity
 import com.example.data.local.CompilerSettings
 import com.example.data.local.ProjectEntity
@@ -61,6 +69,7 @@ import com.example.ui.components.StatusBadge
 import com.example.ui.theme.StatusSuccess
 import com.example.ui.theme.ThemeMode
 import com.example.ui.viewmodel.BackendHealthState
+import com.example.ui.viewmodel.GithubStatusState
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -68,10 +77,15 @@ import kotlin.math.roundToInt
 fun HistorySettingsScreen(
     settings: CompilerSettings,
     isFirebaseAiConfigured: Boolean,
+    githubStatus: GithubStatusState,
     backendHealth: BackendHealthState,
     projects: List<ProjectEntity>,
     builds: List<BuildJobEntity>,
     formatBytes: (Long) -> String,
+    onUpdateBuildEngineMode: (BuildEngineMode) -> Unit,
+    onSaveAndVerifyGithub: (String, String) -> Unit,
+    onUpdateDownloadFolder: (String, String) -> Unit,
+    onClearDownloadFolder: () -> Unit,
     onUpdateServerUrl: (String) -> Unit,
     onUpdateGeminiApiKey: (String) -> Unit,
     onCheckHealth: () -> Unit,
@@ -87,7 +101,25 @@ fun HistorySettingsScreen(
     onDeleteBuild: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    var githubRepoInput by remember(settings.githubRepo) { mutableStateOf(settings.githubRepo) }
+    var githubTokenInput by remember(settings.githubToken) { mutableStateOf(settings.githubToken) }
     var serverUrlInput by remember(settings.serverBaseUrl) { mutableStateOf(settings.serverBaseUrl) }
+    val folderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            val doc = DocumentFile.fromTreeUri(context, treeUri)
+            val label = doc?.name ?: treeUri.lastPathSegment ?: "Selected folder"
+            onUpdateDownloadFolder(treeUri.toString(), label)
+        }
+    }
     var geminiKeyInput by remember(settings.geminiApiKey) { mutableStateOf(settings.geminiApiKey) }
     var usernameInput by remember { mutableStateOf(settings.username) }
     var passwordInput by remember { mutableStateOf("") }
@@ -103,6 +135,157 @@ fun HistorySettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Compilation Engine Selector
+            item {
+                SectionCard {
+                    Text("Compilation Engine", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Use GitHub Cloud to compile APKs over mobile internet with zero self-hosted server, or switch to a custom FastAPI Docker backend.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        BuildEngineMode.entries.forEachIndexed { idx, mode ->
+                            SegmentedButton(
+                                selected = settings.buildEngineMode == mode,
+                                onClick = { onUpdateBuildEngineMode(mode) },
+                                shape = SegmentedButtonDefaults.itemShape(index = idx, count = BuildEngineMode.entries.size),
+                                modifier = Modifier.testTag("engine_mode_${mode.id.lowercase()}")
+                            ) {
+                                Text(mode.label)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // GitHub Actions Cloud Compiler Card
+            item {
+                SectionCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.CloudDone, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Text("GitHub Cloud Compiler", style = MaterialTheme.typography.titleMedium)
+                        }
+                        when (githubStatus) {
+                            is GithubStatusState.Verified -> {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Icon(Icons.Default.Verified, contentDescription = null, tint = StatusSuccess, modifier = Modifier.size(16.dp))
+                                    Text(
+                                        text = "${githubStatus.info.defaultBranch}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = StatusSuccess
+                                    )
+                                }
+                            }
+                            is GithubStatusState.Verifying -> {
+                                Text("Verifying...", style = MaterialTheme.typography.labelMedium)
+                            }
+                            is GithubStatusState.Error -> {
+                                Text("Check Config", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                            }
+                            GithubStatusState.Idle -> {
+                                if (settings.githubRepo.isNotBlank() && settings.githubToken.isNotBlank()) {
+                                    Text("Saved", style = MaterialTheme.typography.labelMedium, color = StatusSuccess)
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = githubRepoInput,
+                        onValueChange = { githubRepoInput = it },
+                        label = { Text("GitHub Repository (owner/repo or URL)") },
+                        placeholder = { Text("https://github.com/username/my-compiler") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("github_repo_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = githubTokenInput,
+                        onValueChange = { githubTokenInput = it },
+                        label = { Text("GitHub Personal Access Token") },
+                        supportingText = { Text("Requires repo + workflow scopes. Compiles Android, Flutter, Web-to-APK, Python & C/C++ over mobile data.") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("github_token_input")
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = { onSaveAndVerifyGithub(githubRepoInput, githubTokenInput) },
+                        enabled = githubRepoInput.isNotBlank() && githubTokenInput.isNotBlank() && githubStatus !is GithubStatusState.Verifying,
+                        modifier = Modifier.fillMaxWidth().height(48.dp).testTag("save_verify_github_button")
+                    ) {
+                        Text(if (githubStatus is GithubStatusState.Verifying) "Verifying..." else "Save & Verify GitHub Repo")
+                    }
+                    if (githubStatus is GithubStatusState.Error) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = githubStatus.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            // Auto-Download Output Folder Card
+            item {
+                SectionCard {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("Auto-Download APK Folder", style = MaterialTheme.typography.titleMedium)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "When compilation completes, the APK is automatically downloaded into:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = if (settings.downloadFolderUri.isNotBlank()) {
+                            "Selected folder: ${settings.downloadFolderLabel.ifBlank { settings.downloadFolderUri }}"
+                        } else {
+                            "Default: Downloads/WibesCompilerAI"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { folderPicker.launch(null) },
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("pick_download_folder_button")
+                        ) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Choose Folder")
+                        }
+                        if (settings.downloadFolderUri.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = onClearDownloadFolder,
+                                modifier = Modifier.height(48.dp)
+                            ) {
+                                Text("Use Downloads")
+                            }
+                        }
+                    }
+                }
+            }
+
             // FastAPI Build Backend Connection
             item {
                 SectionCard {

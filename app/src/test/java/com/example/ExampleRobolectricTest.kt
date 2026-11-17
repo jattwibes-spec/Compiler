@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.ai.CompilerAiRepository
 import com.example.data.local.ProjectAnalyzerEngine
 import com.example.data.local.SettingsDataStore
+import com.example.data.remote.GitHubActionsClient
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import com.example.domain.OutputFormat
@@ -128,5 +129,12 @@ class ExampleRobolectricTest {
         val reply = aiRepo.streamDeveloperAssistant("Why did 10.0.2.2 fail?", analysis, "print(123)", null).first()
         assertTrue(reply.contains("10.0.2.2"))
         tempDir.deleteRecursively()
+    }
+    @Test
+    fun `github repo slug normalizer parses urls and slugs`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val gh = GitHubActionsClient(context)
+        assertEquals("octo" to "demo", gh.normalizeRepoSlug("https://github.com/octo/demo.git"))
+        assertEquals("octo" to "demo", gh.normalizeRepoSlug("octo/demo"))
     }
 }

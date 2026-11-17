@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.net.Uri
+import com.example.data.local.BuildEngineMode
 import com.example.data.local.BuildJobEntity
 import com.example.data.local.CompilerSettings
 import com.example.data.local.FileBackupEntity
@@ -13,6 +14,8 @@ import com.example.data.local.WibesDatabase
 import com.example.data.remote.AnalyzeRequestDto
 import com.example.data.remote.AuthRequestDto
 import com.example.data.remote.DynamicBackendClient
+import com.example.data.remote.GitHubActionsClient
+import com.example.data.remote.GitHubRepoVerification
 import com.example.data.remote.HealthResponseDto
 import com.example.data.remote.StartBuildRequestDto
 import com.example.domain.BuildConfiguration
@@ -44,6 +47,7 @@ class CompilerRepository(
     private val projectDao = database.projectDao()
     private val buildJobDao = database.buildJobDao()
     private val backupDao = database.fileBackupDao()
+    private val gitHubClient = GitHubActionsClient(context)
 
     val settingsFlow: Flow<CompilerSettings> = settingsStore.settingsFlow
     val allProjectsFlow: Flow<List<ProjectEntity>> = projectDao.observeAllProjects()
@@ -95,6 +99,17 @@ class CompilerRepository(
         settingsStore.clearAuthSession()
     }
 
+    suspend fun updateBuildEngineMode(mode: BuildEngineMode) = settingsStore.updateBuildEngineMode(mode)
+    suspend fun updateGithubConfig(repo: String, token: String) = settingsStore.updateGithubConfig(repo, token)
+    suspend fun verifyGithubConfig(repo: String, token: String): Result<GitHubRepoVerification> = withContext(Dispatchers.IO) {
+        runCatching {
+            val info = gitHubClient.verifyRepoAccess(repo, token)
+            settingsStore.updateGithubConfig("${info.owner}/${info.repo}", token.trim())
+            info
+        }
+    }
+    suspend fun updateDownloadFolder(uriString: String, label: String) = settingsStore.updateDownloadFolder(uriString, label)
+    suspend fun clearDownloadFolder() = settingsStore.clearDownloadFolder()
     suspend fun updateServerBaseUrl(url: String) = settingsStore.updateServerBaseUrl(url)
     suspend fun updateGeminiApiKey(apiKey: String) = settingsStore.updateGeminiApiKey(apiKey)
     suspend fun updateMaxUploadSizeMb(mb: Int) = settingsStore.updateMaxUploadSizeMb(mb)
@@ -299,8 +314,54 @@ class CompilerRepository(
                     archiveManager.packageWorkspaceToZip(File(entity.workspacePath), it)
                 }
 
-            val api = backendClient.createService(settings.serverBaseUrl, settings.authToken)
             val now = System.currentTimeMillis()
+            if (settings.buildEngineMode == BuildEngineMode.GITHUB_ACTIONS) {
+                val repoStr = settings.githubRepo.trim()
+                val ghToken = settings.githubToken.trim()
+                if (repoStr.isBlank() || ghToken.isBlank()) {
+                    throw IllegalStateException(
+                        "Enter your GitHub repository (owner/repo or URL) and Personal Access Token before starting a cloud build."
+                    )
+                }
+                val ghBuildId = "gh_" + UUID.randomUUID().toString().replace("-", "").take(12)
+                val (slug, runId) = gitHubClient.submitBuild(
+                    repoInput = repoStr,
+                    tokenInput = ghToken,
+                    jobId = ghBuildId,
+                    archiveFile = archiveFile,
+                    language = language,
+                    config = config
+                )
+                val buildJob = BuildJobEntity(
+                    buildId = ghBuildId,
+                    projectId = projectId,
+                    remoteProjectId = "gh|$slug|${runId ?: ""}",
+                    appName = config.appName.ifBlank { entity.name },
+                    packageName = config.packageName,
+                    versionName = config.versionName,
+                    versionCode = config.versionCode,
+                    minSdk = config.minSdk,
+                    targetSdk = config.targetSdk,
+                    outputFormatId = config.outputFormat.id,
+                    buildModeId = config.buildMode.id,
+                    stageName = BuildStage.QUEUED.name,
+                    progressPercent = 8,
+                    dependencyStatus = "Dispatched to GitHub Actions ($slug)",
+                    logsText = "[CLOUD] Uploaded source archive to $slug (branch: wibes-builds).\n[CLOUD] Dispatched GitHub Actions build $ghBuildId.",
+                    errorMessage = null,
+                    outputFilePath = null,
+                    outputFileSizeBytes = 0L,
+                    outputSha256 = null,
+                    durationMillis = 0L,
+                    startedAtMillis = now,
+                    completedAtMillis = null
+                )
+                buildJobDao.upsertBuild(buildJob)
+                BuildMonitorWorker.enqueue(context, ghBuildId)
+                return@runCatching ghBuildId
+            }
+
+            val api = backendClient.createService(settings.serverBaseUrl, settings.authToken)
 
             // 1. Upload archive to FastAPI backend
             val reqFile = archiveFile.asRequestBody("application/zip".toMediaType())
@@ -399,7 +460,22 @@ class CompilerRepository(
         runCatching {
             BuildMonitorWorker.cancel(context, buildId)
             val existing = buildJobDao.getBuildById(buildId)
-            if (existing != null && !existing.buildId.startsWith("local_err_")) {
+            if (existing != null && existing.buildId.startsWith("gh_")) {
+                val settings = settingsStore.settingsFlow.first()
+                val meta = existing.remoteProjectId.orEmpty().split("|")
+                val slug = meta.getOrNull(1)
+                val runId = meta.getOrNull(2)?.toLongOrNull()
+                if (!slug.isNullOrBlank() && slug.contains("/") && runId != null && settings.githubToken.isNotBlank()) {
+                    runCatching {
+                        gitHubClient.cancelRun(
+                            slug.substringBefore("/"),
+                            slug.substringAfter("/"),
+                            settings.githubToken.trim(),
+                            runId
+                        )
+                    }
+                }
+            } else if (existing != null && !existing.buildId.startsWith("local_err_")) {
                 val settings = settingsStore.settingsFlow.first()
                 val api = backendClient.createService(settings.serverBaseUrl, settings.authToken)
                 runCatching { api.cancelBuild(buildId) }
