@@ -759,8 +759,7 @@ class GitHubActionsClient(private val context: Context) {
         }
     }
 
-    fun findRunIdForJob(owner: String, repo: String, tokenInput: String, jobId: String): Long? {
-        val token = cleanToken(tokenInput)
+    fun findRunIdForJob(owner: String, repo: String, token: String, jobId: String): Long? {
         val json = runCatching {
             getJson(
                 "$API_BASE/repos/$owner/$repo/actions/runs?event=workflow_dispatch&per_page=15",
@@ -779,8 +778,7 @@ class GitHubActionsClient(private val context: Context) {
         return null
     }
 
-    fun pollRunSnapshot(owner: String, repo: String, tokenInput: String, runId: Long): GitHubRunSnapshot {
-        val token = cleanToken(tokenInput)
+    fun pollRunSnapshot(owner: String, repo: String, token: String, runId: Long): GitHubRunSnapshot {
         val run = getJson("$API_BASE/repos/$owner/$repo/actions/runs/$runId", token)
         val status = run.optString("status", "queued")
         val conclusion = run.optString("conclusion", "")
@@ -875,12 +873,11 @@ class GitHubActionsClient(private val context: Context) {
     fun downloadCompiledArtifact(
         owner: String,
         repo: String,
-        tokenInput: String,
+        token: String,
         runId: Long,
         jobId: String,
         destDir: File
     ): File {
-        val token = cleanToken(tokenInput)
         destDir.mkdirs()
         val json = getJson("$API_BASE/repos/$owner/$repo/actions/runs/$runId/artifacts", token)
         val artifacts = json.optJSONArray("artifacts")
@@ -932,8 +929,7 @@ class GitHubActionsClient(private val context: Context) {
             ?: throw IllegalStateException("Artifact archive contained no valid compiled output file.")
     }
 
-    fun cancelRun(owner: String, repo: String, tokenInput: String, runId: Long) {
-        val token = cleanToken(tokenInput)
+    fun cancelRun(owner: String, repo: String, token: String, runId: Long) {
         postJson(
             "$API_BASE/repos/$owner/$repo/actions/runs/$runId/cancel",
             token,
@@ -1063,7 +1059,7 @@ class GitHubActionsClient(private val context: Context) {
     private fun newRequestBuilder(url: String, token: String): Request.Builder =
         Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer $token")
+            .header("Authorization", "Bearer ${cleanToken(token)}")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", API_VERSION)
             .header("User-Agent", USER_AGENT)
