@@ -1,0 +1,6 @@
+{
+  "name": "Wibes Compiler AI",
+  "description": "AI-powered universal code-to-application compiler client with local ZIP/project analysis, isolated remote FastAPI build orchestration, and Gemini AI error analysis and repair.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wibes
+      POSTGRES_PASSWORD: wibes_secret
+      POSTGRES_DB: wibes_compiler
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wibes -d wibes_compiler"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://wibes:wibes_secret@postgres:5432/wibes_compiler
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-prod}
+      PROJECTS_ROOT: /data/projects
+      ARTIFACTS_ROOT: /data/artifacts
+    volumes:
+      - build_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.celery_app.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg2://wibes:wibes_secret@postgres:5432/wibes_compiler
+      REDIS_URL: redis://redis:6379/0
+      PROJECTS_ROOT: /data/projects
+      ARTIFACTS_ROOT: /data/artifacts
+    volumes:
+      - build_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata:
+  build_data:
