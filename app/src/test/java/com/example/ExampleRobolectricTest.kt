@@ -98,7 +98,7 @@ class ExampleRobolectricTest {
         flutterDir.deleteRecursively()
     }
     @Test
-    fun `offline AI diagnostics works without Firebase initialization`() = runBlocking {
+    fun `offline AI diagnostics works without Firebase initialization`() = runBlocking<Unit> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val tempDir = File(System.getProperty("java.tmpdir"), "wibes_test_ai").apply {
             deleteRecursively()
