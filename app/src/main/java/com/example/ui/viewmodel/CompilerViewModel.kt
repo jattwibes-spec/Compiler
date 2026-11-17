@@ -57,6 +57,13 @@ data class ChatMessage(
     val isStreaming: Boolean = false
 )
 
+sealed interface GithubStatusState {
+    data object Idle : GithubStatusState
+    data object Verifying : GithubStatusState
+    data class Verified(val info: GitHubRepoVerification) : GithubStatusState
+    data class Error(val message: String) : GithubStatusState
+}
+
 sealed interface BackendHealthState {
     data object Unknown : BackendHealthState
     data object Checking : BackendHealthState

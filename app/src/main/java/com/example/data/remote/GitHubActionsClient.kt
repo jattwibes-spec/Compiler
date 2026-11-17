@@ -222,7 +222,7 @@ class GitHubActionsClient(private val context: Context) {
                 } else 25
                 val mappedStage = when {
                     activeStepName.contains("detect", ignoreCase = true) ||
-                        activeStepName.contains("Checkout", ignoreCase = true) -> BuildStage.ANALYZING
+                        activeStepName.contains("Checkout", ignoreCase = true) -> BuildStage.PROVISIONING_SANDBOX
                     activeStepName.contains("Upload", ignoreCase = true) ||
                         activeStepName.contains("Verify", ignoreCase = true) -> BuildStage.PACKAGING
                     else -> BuildStage.COMPILING

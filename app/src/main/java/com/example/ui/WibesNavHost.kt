@@ -210,7 +210,6 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                                 builds = builds,
                                 settings = settings,
                                 maxConcurrentBuilds = settings.maxConcurrentBuilds,
-                                githubStatus = githubStatus,
                                 backendHealth = backendHealth,
                                 formatBytes = viewModel::formatBytes,
                                 onUploadProjectClick = {
@@ -321,6 +320,7 @@ fun WibesAppRoot(viewModel: CompilerViewModel) {
                             HistorySettingsScreen(
                                 settings = settings,
                                 isFirebaseAiConfigured = viewModel.isFirebaseAiConfigured,
+                                githubStatus = githubStatus,
                                 backendHealth = backendHealth,
                                 projects = projects,
                                 builds = builds,
