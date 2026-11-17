@@ -1,0 +1,90 @@
+name: Build and Release APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK 36.1 & accept licenses
+        run: |
+          SDKMANAGER=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-36.1" "build-tools;36.0.0" || "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Generate signing keystores
+        env:
+          KEYSTORE_PASS: ${{ secrets.STORE_PASSWORD != '' && secrets.STORE_PASSWORD || 'wibescompiler2026' }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD != '' && secrets.KEY_PASSWORD || 'wibescompiler2026' }}
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          keytool -genkeypair -v \
+            -keystore my-upload-key.jks \
+            -storepass "$KEYSTORE_PASS" \
+            -alias upload \
+            -keypass "$KEY_PASS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Wibes Compiler AI,O=Wibes,C=US"
+
+      - name: Build Release & Debug APKs
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD != '' && secrets.STORE_PASSWORD || 'wibescompiler2026' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD != '' && secrets.KEY_PASSWORD || 'wibescompiler2026' }}
+        run: |
+          gradle assembleRelease assembleDebug --no-daemon --stacktrace
+          mkdir -p dist-apks
+          cp app/build/outputs/apk/release/*.apk dist-apks/WibesCompilerAI-release.apk
+          cp app/build/outputs/apk/debug/*.apk dist-apks/WibesCompilerAI-debug.apk
+          ls -lh dist-apks/
+
+      - name: Upload APK build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: dist-apks/*.apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v1.0.0"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist-apks/*.apk --clobber
+          else
+            gh release create "$TAG" dist-apks/*.apk \
+              --title "Wibes Compiler AI $TAG" \
+              --notes "Automated Android APK build from commit \`${GITHUB_SHA::7}\`."
+          fi
